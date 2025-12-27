@@ -1,0 +1,25 @@
+services:
+  brinicle:
+    build: .
+    container_name: brinicle
+    ports:
+      - "1984:1984"
+    volumes:
+      - ./brinicle_data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+    deploy:
+      resources:
+        limits:
+          memory: 1gb
+    # mem_limit: 1gb
+    # memswap_limit: 1gb
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:1984/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+

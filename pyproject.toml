@@ -1,0 +1,65 @@
+[project]
+name = "brinicle"
+version = "0.0.1.dev2"
+description = "brinicle is a C++ vector index engine (ANN library) optimized for disk-first, low-RAM similarity search."
+readme = "README.md"
+requires-python = ">=3.10"
+
+license = { text = "Apache-2.0" }
+
+authors = [
+  { name = "brinicle", email = "support@bicardinal.com" }
+]
+keywords = ["brinicle", "vector", "retrieval", "RAG", "bicardinal"]
+
+classifiers = [
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: System Administrators",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Database",
+  "Topic :: Software Development :: Libraries :: Python Modules"
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+server = ["fastapi", "uvicorn[standard]", "pydantic", "python-multipart", "orjson", "numpy"]
+
+[project.urls]
+Homepage = "https://github.com/bicardinal/brinicle"
+Issues = "https://github.com/bicardinal/brinicle/issues"
+
+
+[build-system]
+requires = [
+  "scikit-build-core>=0.11",
+  "pybind11>=2.11",
+  "cmake>=3.18",
+  "ninja"
+]
+build-backend = "scikit_build_core.build"
+
+
+[tool.scikit-build]
+minimum-version = "0.11"
+build.verbose = true
+wheel.packages = ["brinicle"]
+
+sdist.include = [
+  "CMakeLists.txt",
+  "brinicle/**/*",
+  "README.md",
+  "LICENSE",
+  "pyproject.toml",
+]
+
+[tool.scikit-build.cmake.define]
+BRINICLE_NATIVE = "OFF"

@@ -1,0 +1,6 @@
+include LICENSE
+include README.md
+recursive-include brinicle *.py
+recursive-include examples *.py
+recursive-include tests *.py
+recursive-include brinicle/src *.h *.cpp

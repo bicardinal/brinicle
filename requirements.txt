@@ -1,0 +1,7 @@
+numpy
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+pybind11
+orjson
