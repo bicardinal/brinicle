@@ -15,18 +15,17 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import Response
 
-from brinicle import HNSWParams
 from brinicle import VectorEngine
-from ref.io_models import CreateIndexRequest
-from ref.io_models import DeleteRequest
-from ref.io_models import DeleteResponse
-from ref.io_models import FinalizeRequest
-from ref.io_models import HNSWParams
-from ref.io_models import IndexStatusResponse
-from ref.io_models import InitRequest
-from ref.io_models import ListIndexesResponse
-from ref.io_models import RebuildRequest
-from ref.io_models import SuccessResponse
+from brinicle.ref.io_models import CreateIndexRequest
+from brinicle.ref.io_models import DeleteRequest
+from brinicle.ref.io_models import DeleteResponse
+from brinicle.ref.io_models import FinalizeRequest
+from brinicle.ref.io_models import IndexStatusResponse
+from brinicle.ref.io_models import InitRequest
+from brinicle.ref.io_models import ListIndexesResponse
+from brinicle.ref.io_models import LoadIndexRequest
+from brinicle.ref.io_models import RebuildRequest
+from brinicle.ref.io_models import SuccessResponse
 
 indexes: Dict[str, VectorEngine] = {}
 store_dir = "/app/data/"
@@ -149,27 +148,21 @@ async def get_index_status(index_name: str):
     )
 
 
-# @app.post("/indexes/load", response_model=SuccessResponse)
-# async def load_index(request: LoadIndexRequest):
-# 	index_name = request.index_name
-# 	ef_search = request.ef_search
-# 	cpp_params = HNSWParams()
-# 	cpp_params.ef_search = ef_search
-# 	engine = VectorEngine(
-# 		store_dir + index_name,
-# 		-1,
-# 		0.1,
-# 		cpp_params,
-# 	)
+@app.post("/indexes/load", response_model=SuccessResponse)
+async def load_index(request: LoadIndexRequest):
+    index_name = request.index_name
+    engine = VectorEngine(
+        store_dir + index_name,
+        0,  # means load the dim from the index
+    )
 
-# 	indexes[index_name] = engine
+    indexes[index_name] = engine
 
-
-# 	return SuccessResponse(
-# 		success=True,
-# 		message=f"Index '{request.index_name}' created successfully",
-# 		index_name=request.index_name
-# 	)
+    return SuccessResponse(
+        success=True,
+        message=f"Index '{request.index_name}' created successfully",
+        index_name=request.index_name,
+    )
 
 
 @app.post("/init", response_model=SuccessResponse)
@@ -288,7 +281,8 @@ async def finalize_ingest(request: FinalizeRequest):
     try:
         params = request.params
         if params:
-            engine.finalize(request.optimize,
+            engine.finalize(
+                request.optimize,
                 params.M,
                 params.ef_construction,
                 params.ef_search,
@@ -349,27 +343,16 @@ async def rebuild_compact(request: RebuildRequest):
         raise HTTPException(status_code=400, detail=f"Failed to rebuild: {str(e)}")
 
 
-@app.post("/search")
-async def search(request: Request):
-    body = await request.body()
-    data = orjson.loads(body)
-    query_vec = np.array(data["q"], dtype=np.float32)
-    results = indexes[data["index_name"]].search(query_vec, data.get("k", 10))
-    return Response(
-        content=orjson.dumps(results),
-        media_type="application/json",
-    )
-
-
 @app.post("/search.bin")
 async def search_bin(
     index_name: str,
-    k: int,
+    k: int = 10,
+    efs: int = 64,
     body: bytes = Body(..., media_type="application/octet-stream"),
 ):
     idx = indexes.get(index_name)
     query = np.frombuffer(body, dtype=np.float32)
-    neighbors = idx.search(query, k=k)
+    neighbors = idx.search(query, k=k, efs=efs)
     return Response(
         content=orjson.dumps(neighbors, option=orjson.OPT_SERIALIZE_NUMPY),
         media_type="application/json",

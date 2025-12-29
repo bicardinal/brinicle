@@ -16,22 +16,22 @@ using ops::BruteForceKNN;
 
 
 static inline void check_f32_2d(const py::array &a, const char* name) {
-  if (!py::isinstance<py::array>(a)) throw std::runtime_error(std::string(name) + " must be ndarray");
-  if (a.ndim() != 2) throw std::runtime_error(std::string(name) + " must be 2-D float32");
+	if (!py::isinstance<py::array>(a)) throw std::runtime_error(std::string(name) + " must be ndarray");
+	if (a.ndim() != 2) throw std::runtime_error(std::string(name) + " must be 2-D float32");
 }
 
 static inline void check_f32_1d(const py::array &a, const char* name) {
-  if (!py::isinstance<py::array>(a)) throw std::runtime_error(std::string(name) + " must be ndarray");
-  if (a.ndim() != 1) throw std::runtime_error(std::string(name) + " must be 1-D float32");
+	if (!py::isinstance<py::array>(a)) throw std::runtime_error(std::string(name) + " must be ndarray");
+	if (a.ndim() != 1) throw std::runtime_error(std::string(name) + " must be 1-D float32");
 }
 
 PYBIND11_MODULE(_brinicle, m) {
-  m.doc() = "HNSW ANN bindings";
+	m.doc() = "HNSW ANN bindings";
 
 
 	m.def("l2_sqr", 
 	[](const py::array_t<float, py::array::c_style | py::array::forcecast>& a,
-	   const py::array_t<float, py::array::c_style | py::array::forcecast>& b) -> float {
+		const py::array_t<float, py::array::c_style | py::array::forcecast>& b) -> float {
 		if (a.ndim() != 1 || b.ndim() != 1) {
 			throw std::runtime_error("a and b must be 1-D float32 arrays");
 		}
@@ -145,7 +145,7 @@ PYBIND11_MODULE(_brinicle, m) {
 			return std::make_unique<ghnsw_mgr::VectorEngine>(index_path, dim, delta_ratio, params);
 		}),
 		py::arg("index_path"),
-		py::arg("dim") = -1,
+		py::arg("dim") = 0,
 		py::arg("delta_ratio") = 0.10,
 		py::arg("M") = 16,
 		py::arg("ef_construction") = 200,

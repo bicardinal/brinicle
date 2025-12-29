@@ -13,9 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 ENV PYTHONPATH="/app"
 
-COPY brinicle.*.so ./
-
-COPY ref/ ./ref/
+COPY brinicle/ ./brinicle/
 
 RUN mkdir -p ./app/data/indices
 
@@ -27,4 +25,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:1984/')" || exit 1
 
 # run the FastAPI application. workers must be one
-CMD ["uvicorn", "ref.api:app", "--host", "0.0.0.0", "--port", "1984", "--no-access-log", "--workers", "1"]
+CMD ["uvicorn", "brinicle.ref.api:app", "--host", "0.0.0.0", "--port", "1984", "--no-access-log", "--workers", "1"]

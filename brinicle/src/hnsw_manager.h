@@ -256,7 +256,7 @@ public:
 
 	VectorEngine(
 		std::string index_path,
-		std::size_t dim = -1, 
+		std::size_t dim = 0, 
 		float delta_ratio = 0.10,
 		ghnsw::Params p = {})
 	: base_index_path_(std::move(index_path)), 
@@ -306,17 +306,17 @@ public:
 		std::vector<SearchResult> all_results;
 
 		auto pairs = main_idx_->query(q, k, efs);
-		for (const auto& p : pairs) {
-			if (!main_idx_->is_deleted(p.second)) {
-				all_results.push_back({p.first, main_idx_->external_id(p.second)});
+		for (const auto& n : pairs.a) {
+			if (!main_idx_->is_deleted(n.id)) {
+				all_results.push_back({n.dist, main_idx_->external_id(n.id)});
 			}
 		}
 
 		if (delta_idx_) {
 			auto pairs = delta_idx_->query(q, k, efs);
-			for (const auto& p : pairs) {
-				if (!delta_idx_->is_deleted(p.second)) {
-					all_results.push_back({p.first, delta_idx_->external_id(p.second)});
+			for (const auto& n : pairs.a) {
+				if (!main_idx_->is_deleted(n.id)) {
+					all_results.push_back({n.dist, main_idx_->external_id(n.id)});
 				}
 			}
 		}

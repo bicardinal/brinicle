@@ -1,6 +1,5 @@
 .PHONY: install dev test clean docker-build docker-run docker-stop docker-clean help
 
-# Variables
 PYTHON := python3
 PIP := pip3
 DOCKER_IMAGE := brinicle
@@ -15,6 +14,7 @@ help:
 	@echo "  make clean        - Clean up cache and temp files"
 	@echo "  make docker-build - Build Docker image"
 	@echo "  make docker-run   - Run Docker container"
+	@echo "  make docker-run-limitless   - Run Docker container w/o limit"
 	@echo "  make docker-stop  - Stop Docker container"
 	@echo "  make docker-clean - Remove Docker container and image"
 	@echo "  make docker-compose-build - Run docker-compose"
@@ -50,6 +50,19 @@ docker-run:
 	  -e PYTHONUNBUFFERED=1 \
 	  -e LOG_LEVEL=INFO \
 	  --memory="1g" \
+	  --cpus="2.0"  \
+	  --restart unless-stopped \
+	  $(DOCKER_IMAGE)
+	@echo "Container started. API available at http://localhost:$(PORT)"
+
+docker-run-limitless:
+	docker rm -f brinicle 2>/dev/null || true
+	docker run -d \
+	  --name $(DOCKER_CONTAINER) \
+	  -p $(PORT):1984 \
+	  -v ./brinicle_data:/app/data \
+	  -e PYTHONUNBUFFERED=1 \
+	  -e LOG_LEVEL=INFO \
 	  --restart unless-stopped \
 	  $(DOCKER_IMAGE)
 	@echo "Container started. API available at http://localhost:$(PORT)"
@@ -71,12 +84,12 @@ docker-compose-build:
 	docker-compose up --build
 
 format:
-	autoflake ref --remove-all-unused-imports --quiet --in-place -r --exclude third_party
-	isort ref --force-single-line-imports
-	black ref
-	autoflake test_endpoints --remove-all-unused-imports --quiet --in-place -r --exclude third_party
-	isort test_endpoints --force-single-line-imports
-	black test_endpoints
+	autoflake brinicle --remove-all-unused-imports --quiet --in-place -r --exclude third_party
+	isort brinicle --force-single-line-imports
+	black brinicle
+	autoflake tests --remove-all-unused-imports --quiet --in-place -r --exclude third_party
+	isort tests --force-single-line-imports
+	black tests
 
 pybuild:
 	cibuildwheel --platform linux

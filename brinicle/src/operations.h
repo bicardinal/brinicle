@@ -35,7 +35,7 @@ static inline float hsum256_ps(__m256 v) noexcept
 }
 
 
-// ---------- 512‑bit fallback ----------
+// 512‑bit fallback
 static inline float hsum512_ps(__m512 v) noexcept
 {
 #if defined(__AVX512F__)

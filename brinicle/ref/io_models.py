@@ -44,9 +44,6 @@ class CreateIndexRequest(BaseModel):
 
 class LoadIndexRequest(BaseModel):
     index_name: str = Field(..., description="Unique name for the index")
-    ef_search: int = Field(
-        ..., ge=1, description="Size of dynamic candidate list during search"
-    )
 
     @field_validator("index_name")
     @classmethod
@@ -127,9 +124,7 @@ class IngestBatchRequest(BaseModel):
 
 class FinalizeRequest(BaseModel):
     index_name: str = Field(..., description="Name of the index")
-    params: Optional[HNSWParams] = Field(
-        default=None, description="Build parameters"
-    )
+    params: Optional[HNSWParams] = Field(default=None, description="Build parameters")
     optimize: bool = Field(default=False, description="Whether to optimize after build")
 
     @field_validator("index_name")

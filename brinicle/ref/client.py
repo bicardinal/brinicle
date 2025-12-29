@@ -1,8 +1,3 @@
-"""
-This client is built for demo/benchmark purposes only.
-Use the brinicle library directly instead.
-"""
-
 from typing import Any
 from typing import Dict
 from typing import List
@@ -52,13 +47,12 @@ class VectorEngineClient:
         response.raise_for_status()
         return response.json()
 
-    # def load_index(self, index_name: str, ef_search: int) -> Dict[str, Any]:
-    # 	response = self.session.post(
-    # 		f"{self.base_url}/indexes/load",
-    # 		json={"index_name": index_name, "ef_search": ef_search}
-    # 	)
-    # 	response.raise_for_status()
-    # 	return response.json()
+    def load_index(self, index_name: str) -> Dict[str, Any]:
+        response = self.session.post(
+            f"{self.base_url}/indexes/load", json={"index_name": index_name}
+        )
+        response.raise_for_status()
+        return response.json()
 
     def get_status(self, index_name: str) -> Dict[str, Any]:
         response = self.session.get(f"{self.base_url}/indexes/{index_name}/status")
@@ -120,12 +114,12 @@ class VectorEngineClient:
     def finalize(
         self,
         index_name: str,
-        params: Optional[Dict[str, Any]] = None,
+        build_params: Optional[Dict[str, Any]] = None,
         optimize: bool = False,
     ) -> Dict[str, Any]:
         payload = {"index_name": index_name, "optimize": optimize}
-        if params:
-            payload["params"] = params
+        if build_params:
+            payload["build_params"] = build_params
 
         response = self.session.post(f"{self.base_url}/finalize", json=payload)
         response.raise_for_status()
@@ -144,31 +138,17 @@ class VectorEngineClient:
         return response.json()
 
     def rebuild(
-        self, index_name: str, params: Optional[Dict[str, Any]] = None
+        self, index_name: str, build_params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         payload = {"index_name": index_name}
-        if params:
-            payload["params"] = params
+        if build_params:
+            payload["build_params"] = build_params
 
         response = self.session.post(f"{self.base_url}/rebuild", json=payload)
         response.raise_for_status()
         return response.json()
 
     def search(self, index_name: str, query: np.ndarray, k: int = 10) -> List[str]:
-        if isinstance(query, np.ndarray):
-            query = query.tolist()
-
-        payload = orjson.dumps({"index_name": index_name, "q": query, "k": k})
-
-        response = self.session.post(
-            f"{self.base_url}/search",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        response.raise_for_status()
-        return orjson.loads(response.content)
-
-    def search_bin(self, index_name: str, query: np.ndarray, k: int = 10) -> List[str]:
         r = self.session.post(
             f"{self.base_url}/search.bin",
             params={"index_name": index_name, "k": k},

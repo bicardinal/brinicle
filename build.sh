@@ -24,5 +24,5 @@ echo "[build] Compiler : $CXX"
 echo "[build] CXXFLAGS : $CXXFLAGS"
 echo "[build] OpenMP   : $OMPFLAGS"
 
-"$CXX" $CXXFLAGS $OMPFLAGS $PYINCLUDE brinicle/src/bindings.cpp $PYLDFLAGS -shared -o brinicle/brinicle"$PYEXT"
-echo "[build] -> ./brinicle/brinicle$PYEXT"
+"$CXX" $CXXFLAGS $OMPFLAGS $PYINCLUDE brinicle/src/bindings.cpp $PYLDFLAGS -shared -o brinicle/_brinicle"$PYEXT"
+echo "[build] -> ./brinicle/_brinicle$PYEXT"

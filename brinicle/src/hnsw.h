@@ -238,6 +238,73 @@ struct DiskHeader {
 #pragma pack(pop)
 
 
+struct HeapNode {
+	float dist;
+	uint32_t id;
+};
+
+struct BoundedMaxHeap {
+	std::vector<HeapNode> a;
+	uint32_t cap = 0;
+
+	void reset(uint32_t capacity) {
+		cap = capacity;
+		a.clear();
+		a.reserve(capacity);
+	}
+
+	inline uint32_t size() const noexcept { return (uint32_t)a.size(); }
+	inline bool empty() const noexcept { return a.empty(); }
+
+	inline float worst() const noexcept {
+		return a.empty() ? std::numeric_limits<float>::infinity() : a[0].dist;
+	}
+
+	inline void sift_down(uint32_t i) noexcept {
+		const uint32_t sz = (uint32_t)a.size();
+		while (true) {
+			uint32_t l = i * 2 + 1;
+			if (l >= sz) break;
+			uint32_t r = l + 1;
+			uint32_t m = (r < sz && a[r].dist > a[l].dist) ? r : l;
+			if (a[i].dist >= a[m].dist) break;
+			std::swap(a[i], a[m]);
+			i = m;
+		}
+	}
+
+	inline void sift_up(uint32_t i) noexcept {
+		while (i) {
+			uint32_t p = (i - 1) >> 1;
+			if (a[p].dist >= a[i].dist) break;
+			std::swap(a[p], a[i]);
+			i = p;
+		}
+	}
+
+	inline bool push_if_better(float d, uint32_t id, HeapNode* evicted = nullptr) noexcept {
+		if ((uint32_t)a.size() < cap) {
+			a.push_back({d, id});
+			sift_up((uint32_t)a.size() - 1);
+			if (evicted) evicted->id = UINT32_MAX;
+			return true;
+		}
+		if (a.empty()) { // cap might be 0
+			if (evicted) evicted->id = UINT32_MAX;
+			return false;
+		}
+		if (d >= a[0].dist) {
+			if (evicted) evicted->id = UINT32_MAX;
+			return false;
+		}
+		if (evicted) *evicted = a[0];
+		a[0] = {d, id};
+		sift_down(0);
+		return true;
+	}
+};
+
+
 
 
 
@@ -456,7 +523,7 @@ public:
 		vec_mmap_.close();
 	}
 
-	std::vector<Pair> query(const float* q_in, int topk, int efs) {
+	BoundedMaxHeap query(const float* q_in, int topk, int efs) {
 		// if (!l0_.ready) {
 		// 	throw std::runtime_error("query: L0 fused layout not initialized");
 		// }
@@ -494,8 +561,7 @@ public:
 		ws.cand_heap.push_back({cur_dist, ep});
 		std::push_heap(ws.cand_heap.begin(), ws.cand_heap.end(), MinByFirst{});
 
-		ws.best_heap.push_back({cur_dist, ep});
-		std::push_heap(ws.best_heap.begin(), ws.best_heap.end(), MaxByFirst{});
+		ws.best.push_if_better(cur_dist, ep);
 
 		if (!is_deleted(ep)) {
 			++alive_in_best;
@@ -505,7 +571,7 @@ public:
 		float worst_best = cur_dist;
 
 		while (!ws.cand_heap.empty()) {
-			if (alive_in_best >= topk && ws.best_heap.size() >= ef && ws.cand_heap.front().first > worst_best) break;
+			if (alive_in_best >= topk && ws.best.size() >= ef && ws.cand_heap.front().first > worst_best) break;
 
 			std::pop_heap(ws.cand_heap.begin(), ws.cand_heap.end(), MinByFirst{});
 			const uint32_t cand = ws.cand_heap.back().second;
@@ -534,38 +600,35 @@ public:
 
 				const float d_nb = l2_(q_in, vec0(nb), l0_.d);
 
-				if (ws.best_heap.size() < ef || d_nb < worst_best) {
+				if (ws.best.size() < ef || d_nb < worst_best) {
 					ws.cand_heap.push_back({d_nb, nb});
 					std::push_heap(ws.cand_heap.begin(), ws.cand_heap.end(), MinByFirst{});
 
 					const bool nb_dead = is_deleted(nb);
 
 					if (!nb_dead || (alive_in_best >= topk)) {
-						ws.best_heap.push_back({d_nb, nb});
-						std::push_heap(ws.best_heap.begin(), ws.best_heap.end(), MaxByFirst{});
-						if (!nb_dead) {
-							++alive_in_best;
-						}
-						if (ws.best_heap.size() > ef) {
-							std::pop_heap(ws.best_heap.begin(), ws.best_heap.end(), MaxByFirst{});
-							Pair removed = ws.best_heap.back();
-							ws.best_heap.pop_back();
-							if (!is_deleted(removed.second)) {
-								if (alive_in_best > 0) {
+						HeapNode ev;
+						const bool accepted = ws.best.push_if_better(d_nb, nb, &ev);
+
+						if (accepted) {
+							if (!nb_dead) ++alive_in_best;
+
+							// if an eviction happened (heap was full and we replaced the root)
+							if (ev.id != UINT32_MAX) {
+								if (!is_deleted(ev.id) && alive_in_best > 0) {
 									--alive_in_best;
 								}
 							}
+							worst_best = ws.best.worst();
 						}
-						// worst_best = ws.best_heap.front().first;
-						worst_best = ws.best_heap.empty() ? std::numeric_limits<float>::infinity() : ws.best_heap.front().first;
 					}
 
 				}
 			}
 		}
-		return ws.best_heap;
+		return ws.best;
 		// std::vector<Pair> res;
-		// res.reserve(ws.best_heap.size());
+		// res.reserve(ws.best.size());
 		// res.insert(res.end(), ws.best_heap.begin(), ws.best_heap.end());
 		// std::sort(res.begin(), res.end(), [](const Pair& a, const Pair& b){ return a.first < b.first; });
 		// out_idx.clear();
@@ -584,7 +647,7 @@ public:
 		uint32_t tag = 1;
 
 		std::vector<Pair> cand_heap;     // min-heap by distance
-		std::vector<Pair> best_heap;     // max-heap by distance
+		BoundedMaxHeap best;             // max-heap by distance
 
 		void ensure_size(std::size_t n) {
 			if (visited.size() != n) {
@@ -606,9 +669,8 @@ public:
 
 		inline void prepare_heaps(uint32_t ef) {
 			cand_heap.clear();
-			best_heap.clear();
 			if (cand_heap.capacity() < ef) cand_heap.reserve(ef);
-			if (best_heap.capacity() < ef + 1) best_heap.reserve(ef + 1);
+			best.reset(ef);
 		}
 	};
 
@@ -623,7 +685,7 @@ public:
 		}
 		return alive;
 	}
-	int         max_level() const noexcept { return max_level_; }
+	int max_level() const noexcept { return max_level_; }
 
 
 	std::size_t mark_deleted_by_external_ids_and_persist(
