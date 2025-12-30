@@ -8,7 +8,7 @@ requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 
 authors = [
-  { name = "brinicle", email = "support@bicardinal.com" }
+  { name = "bicardinal", email = "support@bicardinal.com" }
 ]
 keywords = ["brinicle", "vector", "retrieval", "RAG", "bicardinal"]
 
