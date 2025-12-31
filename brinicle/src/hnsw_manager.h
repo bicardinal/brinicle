@@ -296,6 +296,7 @@ public:
 		close();
 	}
 
+
 	std::vector<std::string> search(const float* q, int k, int efs) {
 		if (!main_idx_) {
 			throw std::runtime_error("search: layout not initialized");
@@ -306,17 +307,17 @@ public:
 		std::vector<SearchResult> all_results;
 
 		auto pairs = main_idx_->query(q, k, efs);
-		for (const auto& n : pairs.a) {
-			if (!main_idx_->is_deleted(n.id)) {
-				all_results.push_back({n.dist, main_idx_->external_id(n.id)});
+		for (const auto& p : pairs) {
+			if (!main_idx_->is_deleted(p.second)) {
+				all_results.push_back({p.first, main_idx_->external_id(p.second)});
 			}
 		}
 
 		if (delta_idx_) {
 			auto pairs = delta_idx_->query(q, k, efs);
-			for (const auto& n : pairs.a) {
-				if (!main_idx_->is_deleted(n.id)) {
-					all_results.push_back({n.dist, main_idx_->external_id(n.id)});
+			for (const auto& p : pairs) {
+				if (!delta_idx_->is_deleted(p.second)) {
+					all_results.push_back({p.first, delta_idx_->external_id(p.second)});
 				}
 			}
 		}

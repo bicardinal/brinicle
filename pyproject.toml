@@ -1,6 +1,6 @@
 [project]
 name = "brinicle"
-version = "0.0.2"
+version = "0.0.3"
 description = "brinicle is a C++ vector index engine (ANN library) optimized for disk-first, low-RAM similarity search."
 readme = "README.md"
 requires-python = ">=3.10"
