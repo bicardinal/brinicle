@@ -3,7 +3,7 @@
 PYTHON := python3
 PIP := pip3
 DOCKER_IMAGE := brinicle
-DOCKER_CONTAINER := brinicle
+DOCKER_CONTAINER := brinicle_container
 HOST := 0.0.0.0
 PORT := 1984
 

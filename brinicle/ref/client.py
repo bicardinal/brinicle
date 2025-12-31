@@ -91,8 +91,7 @@ class VectorEngineClient:
     ) -> Dict[str, Any]:
         payload = b""
         for vid, vec in enumerate(vectors):
-            vid = ids[vid]
-            id_bytes = vid.encode("ascii")[:8].ljust(8, b"\x00")
+            id_bytes = ids[vid].encode('ascii')[:32].ljust(32, b'\x00')
             payload += id_bytes
 
             if not isinstance(vec, np.ndarray):

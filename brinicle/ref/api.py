@@ -223,7 +223,7 @@ async def ingest_batch(request: Request):
         engine = get_engine(index_name)
         dim = engine.dim
 
-        id_bytes = 8
+        id_bytes = 32
         vec_bytes = dim * 4
         row_bytes = id_bytes + vec_bytes
 
