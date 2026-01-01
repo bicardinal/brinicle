@@ -800,7 +800,8 @@ public:
 
 		if (out_bytes == 0) {
 			::close(fd);
-			throw std::runtime_error("export: cannot map zero bytes");
+			return;
+			// throw std::runtime_error("export: cannot map zero bytes");
 		}
 		void* p = ::mmap(nullptr, out_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 		if (p == MAP_FAILED) {

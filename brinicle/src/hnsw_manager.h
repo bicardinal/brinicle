@@ -223,6 +223,11 @@ public:
 			fd_ = -1;
 		}
 	}
+	void reset_metadata() noexcept {
+		path_.clear();
+		n_ = 0;
+		ids_.clear();
+	}
 
 	~VectorIngestWriter() { close(); }
 
@@ -298,18 +303,20 @@ public:
 
 
 	std::vector<std::string> search(const float* q, int k, int efs) {
-		if (!main_idx_) {
-			throw std::runtime_error("search: layout not initialized");
+		if (!main_idx_ && !delta_idx_) {
+			return {};
 		}
 
 		check_and_reload_if_needed();
 
 		std::vector<SearchResult> all_results;
 
-		auto pairs = main_idx_->query(q, k, efs);
-		for (const auto& p : pairs) {
-			if (!main_idx_->is_deleted(p.second)) {
-				all_results.push_back({p.first, main_idx_->external_id(p.second)});
+		if (main_idx_) {
+			auto pairs = main_idx_->query(q, k, efs);
+			for (const auto& p : pairs) {
+				if (!main_idx_->is_deleted(p.second)) {
+					all_results.push_back({p.first, main_idx_->external_id(p.second)});
+				}
 			}
 		}
 
@@ -344,14 +351,10 @@ public:
 		std::vector<std::string> out;
 		out.reserve(internal.size());
 
-		if (main_idx_) {
-			for (uint32_t id : internal) {
-				out.push_back(main_idx_->external_id(id));
-			}
+		if (main_idx_ && main_size_ > 0) {
+			for (uint32_t id : internal) out.push_back(main_idx_->external_id(id));
 		} else if (delta_idx_) {
-			for (uint32_t id : internal) {
-				out.push_back(delta_idx_->external_id(id));
-			}
+			for (uint32_t id : internal) out.push_back(delta_idx_->external_id(id));
 		}
 
 		return out;
@@ -394,6 +397,7 @@ public:
 		if (not_found) {
 			*not_found = local_not_found;
 		}
+		promote_delta_to_main_if_main_empty_locked();
 		// update mtimes after modification
 		update_mtimes();
 		return deleted;
@@ -469,8 +473,8 @@ public:
 				auto counts = delete_external_ids_internal(ids_to_delete);
 				// you know, cases like deleting all main elements.
 				force_reload_indices();
-				if ((main_size_ - counts.first) <= 0) {
-					build_from_scratch(build_params, tmp_prefix_base);
+				if ((main_size_ - counts.first) <= 0 or main_size_ == 0) {
+					merge_delta_and_rebuild(build_params, tmp_prefix_base);
 				} else {
 					if (!optimize) {
 						absorb_into_delta(build_params, tmp_prefix_base);
@@ -489,9 +493,12 @@ public:
 			unlink_noexcept(pending_vec_path_);
 		} catch (...) {
 			unlink_noexcept(pending_vec_path_);
+			writer_.reset_metadata();
+			pending_mode_ = PendingMode::None;
+			pending_vec_path_.clear();
 			throw;
 		}
-
+		writer_.reset_metadata();
 		pending_mode_ = PendingMode::None;
 		pending_vec_path_.clear();
 	}
@@ -560,7 +567,7 @@ public:
 			std::vector<std::string> delta_alive_ids;
 			std::string delta_vec_tmp = unique_temp_file(base_index_path_, ".alive.tmp");
 			delta_idx_->export_alive_vectors_to_file(delta_vec_tmp, delta_alive_ids);
-			append_vectors_to_file(alive_vec_path, delta_vec_tmp, delta_alive_ids);
+			append_vectors_to_file(alive_vec_path, delta_vec_tmp);
 			alive_ids.insert(alive_ids.end(), delta_alive_ids.begin(), delta_alive_ids.end());
 			unlink_noexcept(delta_vec_tmp);
 		}
@@ -623,10 +630,19 @@ public:
 	}
 
 	void optimize_graph() {
+		CombinedLock lock(lock_path_);
+		force_reload_indices();
+		if (!has_index()) return;
+
+		if (pending_mode_ != PendingMode::None) {
+			throw std::runtime_error("optimize_graph: cannot optimize while ingest is pending");
+		}
+
 		if (needs_rebuild()) {
-			merge_delta_and_rebuild(params_, "brinicletmp");
+			merge_delta_and_rebuild(params_, "brinicletmp", /*include_writer=*/false);
 		}
 	}
+
 
 	void close() {
 		main_idx_.reset();
@@ -653,6 +669,17 @@ public:
 	}
 
 private:
+
+	void promote_delta_to_main_if_main_empty_locked() {
+		if (main_idx_ && main_size_ == 0 && delta_idx_ && delta_size_ > 0) {
+			atomic_rename(delta_path_, main_path_);
+			delta_idx_.reset();
+			delta_size_ = 0;
+			delta_mtime_ = 0;
+			force_reload_indices();
+		}
+	}
+
 	static PendingMode parse_mode(const std::string& m) {
 		if (m == "build")  return PendingMode::Build;
 		if (m == "insert") return PendingMode::Insert;
@@ -772,7 +799,7 @@ private:
 			combined_vec_path = unique_temp_file(delta_path_, ".combined.tmp");
 			delta_idx_->export_alive_vectors_to_file(combined_vec_path, combined_ids);
 
-			append_vectors_to_file(combined_vec_path, writer_.path(), writer_.ids());
+			append_vectors_to_file(combined_vec_path, writer_.path());
 			combined_ids.insert(combined_ids.end(), writer_.ids().begin(), writer_.ids().end());
 		} else {
 			combined_vec_path = writer_.path();
@@ -799,7 +826,7 @@ private:
 		force_reload_indices();
 	}
 
-	void merge_delta_and_rebuild(ghnsw::Params build_params, const std::string& tmp_prefix_base) {
+	void merge_delta_and_rebuild(ghnsw::Params build_params, const std::string& tmp_prefix_base, bool include_writer = true) {
 		std::string merged_vec_path = unique_temp_file(base_index_path_, ".merged.tmp");
 		std::vector<std::string> merged_ids;
 
@@ -811,9 +838,8 @@ private:
 			std::vector<std::string> delta_ids;
 			std::string delta_vec_tmp = unique_temp_file(base_index_path_, ".export.tmp");
 			delta_idx_->export_alive_vectors_to_file(delta_vec_tmp, delta_ids);
-
 			if (main_idx_) {
-				append_vectors_to_file(merged_vec_path, delta_vec_tmp, delta_ids);
+				append_vectors_to_file(merged_vec_path, delta_vec_tmp);
 			} else {
 				merged_vec_path = delta_vec_tmp;
 			}
@@ -825,10 +851,13 @@ private:
 			}
 		}
 
-		append_vectors_to_file(merged_vec_path, writer_.path(), writer_.ids());
-		merged_ids.insert(merged_ids.end(), writer_.ids().begin(), writer_.ids().end());
+		if (include_writer) {
+			if (!writer_.path().empty() && file_exists(writer_.path()) && !writer_.ids().empty()) {
+				append_vectors_to_file(merged_vec_path, writer_.path());
+				merged_ids.insert(merged_ids.end(), writer_.ids().begin(), writer_.ids().end());
+			}
+		}
 
-		// const std::string tmp_main = main_path_ + ".new";
 		const std::string tmp = unique_temp_file(tmp_prefix_base);
 		const std::string tmp_main = unique_temp_file(main_path_, ".new");
 		build_params.save_path = tmp_main;
@@ -851,8 +880,7 @@ private:
 	}
 
 	void append_vectors_to_file(const std::string& dest_path, 
-							   const std::string& src_path,
-							   const std::vector<std::string>& src_ids) {
+							   const std::string& src_path) {
 		int fd_dest = ::open(dest_path.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0644);
 		if (fd_dest < 0) {
 			throw std::runtime_error("append_vectors_to_file: failed to open dest: " + dest_path);

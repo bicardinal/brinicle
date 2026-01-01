@@ -64,6 +64,6 @@ print(engine.search(Q, k=10))
 
 To re-build:
 ```python
-engine.optimize()
+engine.optimize_graph()
 print(engine.search(Q, k=10))
 ```
