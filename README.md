@@ -1,6 +1,8 @@
+
 # brinicle
 **brinicle** is a **C++ vector index engine (ANN library)** optimized for **disk-first, low-RAM** similarity search. It provides fast build + query, supports inserts/upserts/deletes, and targets predictable latency at high recall with minimal memory overhead on constrained environments.
-
+It is as fast as FAISS, and hnswlib, while staying completely out of RAM.
+To see the comparisons with vector databases and in-process libraries see [the benchmark](https://brinicle.bicardinal.com/benchmark).
 
 ## Install
 
@@ -67,3 +69,8 @@ To re-build:
 engine.optimize_graph()
 print(engine.search(Q, k=10))
 ```
+
+
+## License
+
+brinicle is licensed under the Apache License, Version 2.0, [License file](https://github.com/bicardinal/brinicle/blob/main/LICENSE).
