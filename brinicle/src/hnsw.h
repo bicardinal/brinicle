@@ -148,14 +148,18 @@ struct MMapRW {
 
 	void close() noexcept {
 		if (data && size) {
-			::msync(data, size, MS_ASYNC);
+			::msync(data, size, MS_SYNC);
 			::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
 			::madvise(data, size, MADV_DONTNEED);
 			::munmap(data, size);
 			// malloc_trim(0);
 		}
-		data = nullptr; size = 0;
-		if (fd >= 0) ::close(fd);
+		data = nullptr;
+		size = 0;
+		if (fd >= 0) {
+			::fsync(fd);
+			::close(fd);
+		}
 		fd = -1;
 	}
 
@@ -1178,6 +1182,7 @@ private:
 			}
 		}
 		::msync(base, total_size, MS_SYNC);
+		out.close();
 	}
 
 	inline int node_level(uint32_t u) const noexcept {
