@@ -344,6 +344,57 @@ public:
 		return out;
 	}
 
+	std::vector<std::pair<std::string, float>>
+	search_with_distance(const float* q, int k, int efs) {
+		if (!main_idx_ && !delta_idx_) {
+			return {};
+		}
+
+		check_and_reload_if_needed();
+
+		std::vector<SearchResult> all_results;
+
+		if (main_idx_) {
+			auto pairs = main_idx_->query(q, k, efs);
+			for (const auto& p : pairs) {
+				if (!main_idx_->is_deleted(p.second)) {
+					all_results.push_back({
+						p.first,                       // distance
+						main_idx_->external_id(p.second)
+					});
+				}
+			}
+		}
+
+		if (delta_idx_) {
+			auto pairs = delta_idx_->query(q, k, efs);
+			for (const auto& p : pairs) {
+				if (!delta_idx_->is_deleted(p.second)) {
+					all_results.push_back({
+						p.first,                       // distance
+						delta_idx_->external_id(p.second)
+					});
+				}
+			}
+		}
+
+		if (all_results.empty()) {
+			return {};
+		}
+
+		std::sort(all_results.begin(), all_results.end());
+
+		std::vector<std::pair<std::string, float>> out;
+		out.reserve(k);
+
+		for (const auto& res : all_results) {
+			out.emplace_back(res.external_id, res.distance);
+			if ((int)out.size() >= k) break;
+		}
+
+		return out;
+	}
+
 	std::vector<std::string> map_internal_to_external(const std::vector<uint32_t>& internal) {
 		check_and_reload_if_needed();
 		ensure_has_any_index();

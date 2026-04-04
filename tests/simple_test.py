@@ -45,10 +45,8 @@ class VectorEngineSimpleTests:
                 for m in dir(self)
                 if m.startswith("test_") and callable(getattr(self, m))
             ]
-
             for test_method in test_methods:
                 self._run_test(test_method)
-
             print(f"\n{'='*60}")
             print(f"Results: {self.passed_count}/{self.test_count} tests passed")
             print(f"{'='*60}")
@@ -57,7 +55,8 @@ class VectorEngineSimpleTests:
 
     def test_simple_insert(self):
         D = 2
-        n = 5
+        n = 10000
+        k = n
         X = np.random.randn(n, D).astype(np.float32)
         Q = np.random.randn(D).astype(np.float32)
         engine = brinicle.VectorEngine(self._get_test_path("empty_id"), dim=D, delta_ratio=0.1)
@@ -65,11 +64,11 @@ class VectorEngineSimpleTests:
         for eid in range(n):
             engine.ingest(str(eid), X[eid])
         engine.finalize()
-        search = engine.search(Q, k=n)
+        search = [int(x) for x in engine.search(Q, k=k)]
 
-        assert len(search) == n, "invalid search length"
-        assert sorted(search) == [str(i) for i in range(n)], "invalid ids"
-        assert len(set(search)) == n, "duplicate results" # to see if there are duplicates
+        assert len(search) == k, "invalid search length"
+        assert sorted(search) == [i for i in range(k)], "invalid ids"
+        assert len(set(search)) == k, "duplicate results" # to see if there are duplicates
 
         Y = np.random.randn(5, D).astype(np.float32)
         engine.init(mode="insert")
@@ -77,7 +76,7 @@ class VectorEngineSimpleTests:
             engine.ingest(str(eid) + "x", Y[eid])
         engine.finalize()
         search = engine.search(Q, k=n + 5)
-        print(search)
+
         assert len(search) == n + 5, "invalid search length"
         assert len(set(search)) == n + 5, "duplicate results" # to see if there are duplicates
         assert sorted(search) == sorted([str(i) for i in range(n)] + [str(i) + 'x' for i in range(5)]), "invalid ids" # to see if new inserts appear in the results.

@@ -265,11 +265,32 @@ PYBIND11_MODULE(_brinicle, m) {
 			}
 			return out;
 		},
+
 		py::arg("q"),
 		py::arg("k") = 10,
 		py::arg("efs") = 64,
 		"Search, and return external IDs")
+		.def("search_with_distance", [](ghnsw_mgr::VectorEngine& self,
+										const py::array& q,
+										int k,
+										int efs) {
+			check_f32_1d(q, "q");
+			auto a = py::array_t<float, py::array::c_style | py::array::forcecast>(q);
 
+			if ((std::size_t)a.shape(0) != self.dim())
+				throw std::runtime_error("search_with_distance: dimension mismatch");
+
+			std::vector<std::pair<std::string, float>> out;
+			{
+				py::gil_scoped_release rel;
+				out = self.search_with_distance(a.data(), k, efs);
+			}
+			return out;
+		},
+		py::arg("q"),
+		py::arg("k") = 10,
+		py::arg("efs") = 64,
+		"Search, and return external IDs")
 
 		.def("needs_rebuild", &ghnsw_mgr::VectorEngine::needs_rebuild)
 		.def("optimize_graph", &ghnsw_mgr::VectorEngine::optimize_graph)

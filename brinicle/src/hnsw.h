@@ -973,9 +973,6 @@ private:
 				float bestCandDist = -cand_heap.top().first; // convert back to +dist
 				if (best_heap.size() == (size_t)P_.ef_construction && bestCandDist > worst_best)
 					break;
-				// if (cand_heap.top().first > worst_best && best_heap.size() == P_.ef_construction) {
-				// 	break;
-				// }
 				auto [d_cand, cand] = cand_heap.top(); cand_heap.pop(); d_cand = -d_cand;
 
 				auto [beg, end] = neighbors_build(cand, l);
