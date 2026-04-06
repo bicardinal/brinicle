@@ -147,7 +147,11 @@ private:
 
 class VectorIngestWriter {
 public:
-	void init(const std::string& vectors_path, std::size_t dim, bool truncate = true) {
+	void init(
+		const std::string& vectors_path,
+		std::size_t dim,
+		bool truncate = true
+	) {
 		close();
 
 		path_ = vectors_path;
@@ -263,7 +267,8 @@ public:
 		std::string index_path,
 		std::size_t dim = 0, 
 		float delta_ratio = 0.10,
-		ghnsw::Params p = {})
+		ghnsw::Params p = {},
+		std::string dist_func = "l2")
 	: base_index_path_(std::move(index_path)), 
 	  params_(p)
 	{
@@ -274,14 +279,14 @@ public:
 
 		dim_ = dim;
 		delta_ratio_ = delta_ratio;
-
+		dist_func_ = dist_func;
 		main_path_ = base_index_path_ + ".main";
 		delta_path_ = base_index_path_ + ".delta";
 		lock_path_ = base_index_path_ + ".lock";
 		p.save_path = main_path_;
 		bool iexists = false;
 		if (file_exists(main_path_)) {
-			main_idx_.reset(new ghnsw::Index(main_path_, params_.ef_search));
+			main_idx_.reset(new ghnsw::Index(main_path_, params_.ef_search, dist_func));
 			main_size_ = main_idx_->active_size();
 			main_mtime_ = file_mtime(main_path_);
 			dim_ = main_idx_->dim();
@@ -291,7 +296,7 @@ public:
 			throw std::invalid_argument("dim must be greater than 0");
 		}
 		if (file_exists(delta_path_)) {
-			delta_idx_.reset(new ghnsw::Index(delta_path_, params_.ef_search));
+			delta_idx_.reset(new ghnsw::Index(delta_path_, params_.ef_search, dist_func));
 			delta_size_ = delta_idx_->active_size();
 			delta_mtime_ = file_mtime(delta_path_);
 		}
@@ -572,7 +577,7 @@ public:
 		const std::string tmp = unique_temp_file(tmp_prefix);
 
 		{
-			ghnsw::Index builder(vectors_path, external_ids, dim_, build_params, tmp);
+			ghnsw::Index builder(vectors_path, external_ids, dim_, build_params, tmp, dist_func_);
 			builder.fit();
 		}
 
@@ -624,7 +629,7 @@ public:
 		}
 
 		{
-			ghnsw::Index builder(alive_vec_path, alive_ids, dim_, build_params, tmp_prefix);
+			ghnsw::Index builder(alive_vec_path, alive_ids, dim_, build_params, tmp_prefix, dist_func_);
 			builder.fit();
 		}
 
@@ -753,7 +758,7 @@ private:
 		// reload if files changed
 		if (current_main_mtime != main_mtime_) {
 			if (current_main_mtime > 0) {
-				main_idx_.reset(new ghnsw::Index(main_path_, params_.ef_search));
+				main_idx_.reset(new ghnsw::Index(main_path_, params_.ef_search, dist_func_));
 				main_size_ = main_idx_->active_size();
 				main_mtime_ = current_main_mtime;
 			} else {
@@ -765,7 +770,7 @@ private:
 
 		if (current_delta_mtime != delta_mtime_) {
 			if (current_delta_mtime > 0) {
-				delta_idx_.reset(new ghnsw::Index(delta_path_, params_.ef_search));
+				delta_idx_.reset(new ghnsw::Index(delta_path_, params_.ef_search, dist_func_));
 				delta_size_ = delta_idx_->active_size();
 				delta_mtime_ = current_delta_mtime;
 			} else {
@@ -779,7 +784,7 @@ private:
 	void force_reload_indices() {
 		// used by write operations after acquiring lock
 		if (file_exists(main_path_)) {
-			main_idx_.reset(new ghnsw::Index(main_path_, params_.ef_search));
+			main_idx_.reset(new ghnsw::Index(main_path_, params_.ef_search, dist_func_));
 			main_size_ = main_idx_->active_size();
 			main_mtime_ = file_mtime(main_path_);
 		} else {
@@ -788,7 +793,7 @@ private:
 			main_mtime_ = 0;
 		}
 		if (file_exists(delta_path_)) {
-			delta_idx_.reset(new ghnsw::Index(delta_path_, params_.ef_search));
+			delta_idx_.reset(new ghnsw::Index(delta_path_, params_.ef_search, dist_func_));
 			delta_size_ = delta_idx_->active_size();
 			delta_mtime_ = file_mtime(delta_path_);
 		} else {
@@ -827,7 +832,7 @@ private:
 		const std::string tmp = unique_temp_file(tmp_prefix_base);
 
 		{
-			ghnsw::Index builder(writer_.path(), writer_.ids(), dim_, build_params, tmp);
+			ghnsw::Index builder(writer_.path(), writer_.ids(), dim_, build_params, tmp, dist_func_);
 			builder.fit();
 		}
 
@@ -862,7 +867,7 @@ private:
 		build_params.save_path = tmp_delta;
 
 		{
-			ghnsw::Index builder(combined_vec_path, combined_ids, dim_, build_params, tmp);
+			ghnsw::Index builder(combined_vec_path, combined_ids, dim_, build_params, tmp, dist_func_);
 			builder.fit();
 		}
 
@@ -914,7 +919,7 @@ private:
 		build_params.save_path = tmp_main;
 
 		{
-			ghnsw::Index builder(merged_vec_path, merged_ids, dim_, build_params, tmp);
+			ghnsw::Index builder(merged_vec_path, merged_ids, dim_, build_params, tmp, dist_func_);
 			builder.fit();
 		}
 
@@ -965,6 +970,7 @@ private:
 	std::string main_path_;
 	std::string delta_path_;
 	std::string lock_path_;
+	std::string dist_func_;
 
 	std::size_t dim_ = 0;
 	ghnsw::Params params_;

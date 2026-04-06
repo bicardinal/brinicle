@@ -66,7 +66,11 @@ static inline void aligned_free64(void* p) {
 namespace ghnsw {
 
 using l2func_t = float(*)(const float* __restrict, const float* __restrict, std::size_t) noexcept;
-inline l2func_t choose_l2() noexcept { return &ops::l2_sqr; }
+inline l2func_t l2_distance() noexcept { return &ops::l2_sqr; }
+
+inline l2func_t lexical_distance() noexcept {
+    return &ops::lexical_structured_distance;
+}
 
 using Pair = std::pair<float,uint32_t>;
 
@@ -259,7 +263,8 @@ public:
 		  const std::vector<std::string>& external_ids,
 		  std::size_t dim,
 		  const Params& param,
-		  const std::string& tmp_prefix = "buildtmp")
+		  const std::string& tmp_prefix = "buildtmp",
+		  const std::string& dist_func = "l2")
 	{
 		P_ = param;
 		n_ = external_ids.size();
@@ -269,7 +274,13 @@ public:
 
 		if (n_ == 0 || d_ == 0) throw std::runtime_error("fit: empty dataset");
 
-		l2_ = choose_l2();
+		if (dist_func == "l2") {
+			l2_ = l2_distance();
+		} else if (dist_func == "lexical") {
+			l2_ = lexical_distance();
+		} else {
+			throw std::runtime_error("invalid distance function name.");
+		}
 
 		external_ids_ = external_ids;
 		if (external_ids_.size() != n_) {
@@ -312,8 +323,19 @@ public:
 	}
 
 	// search-only constructor
-	explicit Index(const std::string& index_path, int ef_search = 64) {
-		l2_ = choose_l2();
+	explicit Index(
+		const std::string& index_path,
+		int ef_search = 64,
+		const std::string& dist_func = "l2"
+	) {
+
+		if (dist_func == "l2") {
+			l2_ = l2_distance();
+		} else if (dist_func == "lexical") {
+			l2_ = lexical_distance();
+		} else {
+			throw std::runtime_error("invalid distance function name.");
+		}
 
 		mmap_region_.open_readonly(index_path);
 		if (mmap_region_.size < sizeof(DiskHeader))

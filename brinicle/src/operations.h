@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <immintrin.h>
+#include <algorithm>
 
 namespace ops {
 
@@ -274,5 +275,128 @@ inline void dot_mat_vec(const float* Mat,
 		out[i] = dot(Mat + i * dim, v, dim);
 	}
 }
+
+
+// #########################################
+
+
+constexpr std::size_t kHeaderSize = 5;
+constexpr std::uint32_t kEncodingVersion = 1;
+
+inline std::size_t clamp_count(std::size_t wanted, std::size_t available) noexcept {
+    return wanted < available ? wanted : available;
+}
+
+inline std::uint32_t as_id(float x) noexcept {
+    if (x <= 0.0f) return 0u;
+    return static_cast<std::uint32_t>(x);
+}
+
+inline std::size_t intersection_count_sorted_ids(
+    const float* a, std::size_t na,
+    const float* b, std::size_t nb
+) noexcept {
+    std::size_t i = 0;
+    std::size_t j = 0;
+    std::size_t inter = 0;
+
+    while (i < na && j < nb) {
+        const std::uint32_t va = as_id(a[i]);
+        const std::uint32_t vb = as_id(b[j]);
+
+        if (va == vb) {
+            if (va != 0u) {
+                ++inter;
+            }
+            ++i;
+            ++j;
+        } else if (va < vb) {
+            ++i;
+        } else {
+            ++j;
+        }
+    }
+
+    return inter;
+}
+
+inline float jaccard_distance_sorted_ids(
+    const float* a, std::size_t na,
+    const float* b, std::size_t nb
+) noexcept {
+    if (na == 0 && nb == 0) {
+        return 0.0f;
+    }
+
+    const std::size_t inter = intersection_count_sorted_ids(a, na, b, nb);
+    const std::size_t uni = na + nb - inter;
+
+    if (uni == 0) {
+        return 0.0f;
+    }
+
+    return 1.0f - (static_cast<float>(inter) / static_cast<float>(uni));
+}
+
+inline float lexical_structured_distance(
+    const float* __restrict a,
+    const float* __restrict b,
+    std::size_t dim
+) noexcept {
+    if (dim < kHeaderSize) {
+        return 1.0f;
+    }
+
+    const std::uint32_t ver_a = as_id(a[0]);
+    const std::uint32_t ver_b = as_id(b[0]);
+    if (ver_a != kEncodingVersion || ver_b != kEncodingVersion) {
+        return 1.0f;
+    }
+
+    const std::size_t payload = dim - kHeaderSize;
+
+    std::size_t a_title_n = clamp_count(static_cast<std::size_t>(a[1]), payload);
+    std::size_t b_title_n = clamp_count(static_cast<std::size_t>(b[1]), payload);
+
+    std::size_t a_attr_n = clamp_count(static_cast<std::size_t>(a[2]), payload - a_title_n);
+    std::size_t b_attr_n = clamp_count(static_cast<std::size_t>(b[2]), payload - b_title_n);
+
+    const std::uint32_t a_brand = as_id(a[3]);
+    const std::uint32_t b_brand = as_id(b[3]);
+
+    const std::uint32_t a_category = as_id(a[4]);
+    const std::uint32_t b_category = as_id(b[4]);
+
+    const float* a_title = a + kHeaderSize;
+    const float* b_title = b + kHeaderSize;
+
+    const float* a_attr = a_title + a_title_n;
+    const float* b_attr = b_title + b_title_n;
+
+    const float title_dist = jaccard_distance_sorted_ids(a_title, a_title_n, b_title, b_title_n);
+    const float attr_dist  = jaccard_distance_sorted_ids(a_attr,  a_attr_n,  b_attr,  b_attr_n);
+
+    // 0 means "unspecified" on query side, so do not penalize.
+    // Assumes `a` is the query vector and `b` is the product vector.
+    const float brand_dist =
+        (a_brand == 0u || b_brand == 0u) ? 0.0f :
+        (a_brand == b_brand ? 0.0f : 1.0f);
+
+    const float cat_dist =
+        (a_category == 0u || b_category == 0u) ? 0.0f :
+        (a_category == b_category ? 0.0f : 1.0f);
+
+    constexpr float w_title = 0.55f;
+    constexpr float w_attr  = 0.15f;
+    constexpr float w_brand = 0.20f;
+    constexpr float w_cat   = 0.10f;
+
+    return
+        w_title * title_dist +
+        w_attr  * attr_dist +
+        w_brand * brand_dist +
+        w_cat   * cat_dist;
+}
+
 
 }

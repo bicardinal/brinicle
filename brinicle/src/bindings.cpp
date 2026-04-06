@@ -135,14 +135,15 @@ PYBIND11_MODULE(_brinicle, m) {
 					 std::size_t M,
 					 std::size_t ef_construction,
 					 std::size_t ef_search,
-					 std::size_t seed) {
+					 std::size_t seed,
+					 const std::string& dist_func) {
 			ghnsw::Params params;
 			params.M = M;
 			params.ef_construction = ef_construction;
 			params.ef_search = ef_search;
 			params.rng_seed = seed;
 			py::gil_scoped_release rel;
-			return std::make_unique<ghnsw_mgr::VectorEngine>(index_path, dim, delta_ratio, params);
+			return std::make_unique<ghnsw_mgr::VectorEngine>(index_path, dim, delta_ratio, params, dist_func);
 		}),
 		py::arg("index_path"),
 		py::arg("dim") = 0,
@@ -150,7 +151,8 @@ PYBIND11_MODULE(_brinicle, m) {
 		py::arg("M") = 16,
 		py::arg("ef_construction") = 200,
 		py::arg("ef_search") = 64,
-		py::arg("seed") = 0)
+		py::arg("seed") = 0,
+		py::arg("dist_func") = "l2")
 
 
 		.def("init", [](ghnsw_mgr::VectorEngine& self,
