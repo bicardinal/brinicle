@@ -5,3 +5,4 @@ pydantic
 python-multipart
 pybind11
 orjson
+tokenizers

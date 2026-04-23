@@ -1,11 +1,13 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
-
+#include <limits>
 #include "hnsw.h"
 #include "hnsw_manager.h"
 
 #include "knn.h"
+
+
 
 #ifdef _OPENMP
   #include <omp.h>
@@ -119,7 +121,6 @@ PYBIND11_MODULE(_brinicle, m) {
 	py::arg("X"), py::arg("Q"), py::arg("k"), py::arg("n_jobs") = -1
 	);
 
-
 	py::class_<ghnsw::Params>(m, "HNSWParams")
 		.def(py::init<>())
 		.def_readwrite("M", &ghnsw::Params::M)
@@ -128,22 +129,52 @@ PYBIND11_MODULE(_brinicle, m) {
 		.def_readwrite("rng_seed", &ghnsw::Params::rng_seed);
 
 
+	py::class_<ghnsw::LexicalConfig>(m, "LexicalConfig")
+		.def(py::init<>())
+		.def_readwrite("build_title_weight", &ghnsw::LexicalConfig::build_title_weight)
+		.def_readwrite("build_attr_weight", &ghnsw::LexicalConfig::build_attr_weight)
+		.def_readwrite("build_brand_weight", &ghnsw::LexicalConfig::build_brand_weight)
+		.def_readwrite("build_category_weight", &ghnsw::LexicalConfig::build_category_weight)
+		.def_readwrite("build_category_penalty", &ghnsw::LexicalConfig::build_category_penalty)
+		.def_readwrite("search_title_weight", &ghnsw::LexicalConfig::search_title_weight)
+		.def_readwrite("search_attr_weight", &ghnsw::LexicalConfig::search_attr_weight)
+		.def_readwrite("search_brand_weight", &ghnsw::LexicalConfig::search_brand_weight)
+		.def_readwrite("search_category_weight", &ghnsw::LexicalConfig::search_category_weight)
+		.def_readwrite("search_category_penalty", &ghnsw::LexicalConfig::search_category_penalty)
+		.def_readwrite("build_title_alpha", &ghnsw::LexicalConfig::build_title_alpha)
+		.def_readwrite("build_title_beta", &ghnsw::LexicalConfig::build_title_beta)
+		.def_readwrite("search_title_alpha", &ghnsw::LexicalConfig::search_title_alpha)
+		.def_readwrite("search_title_beta", &ghnsw::LexicalConfig::search_title_beta);
+
+
+	py::class_<ghnsw::AutocompleteConfig>(m, "AutocompleteConfig")
+		.def(py::init<>())
+		.def_readwrite("build_position_decay", &ghnsw::AutocompleteConfig::build_position_decay)
+		.def_readwrite("build_length_penalty", &ghnsw::AutocompleteConfig::build_length_penalty)
+		.def_readwrite("search_position_decay", &ghnsw::AutocompleteConfig::search_position_decay)
+		.def_readwrite("search_length_penalty", &ghnsw::AutocompleteConfig::search_length_penalty);
+
+
 	py::class_<ghnsw_mgr::VectorEngine>(m, "VectorEngine")
 		.def(py::init([](const std::string& index_path,
-					 std::size_t dim,
-					 const float delta_ratio,
-					 std::size_t M,
-					 std::size_t ef_construction,
-					 std::size_t ef_search,
-					 std::size_t seed,
-					 const std::string& dist_func) {
+						 std::size_t dim,
+						 const float delta_ratio,
+						 std::size_t M,
+						 std::size_t ef_construction,
+						 std::size_t ef_search,
+						 std::size_t seed,
+						 const std::string& dist_func,
+						 const ghnsw::LexicalConfig& lexical_config,
+						 const ghnsw::AutocompleteConfig& autocomplete_config) {
 			ghnsw::Params params;
 			params.M = M;
 			params.ef_construction = ef_construction;
 			params.ef_search = ef_search;
 			params.rng_seed = seed;
 			py::gil_scoped_release rel;
-			return std::make_unique<ghnsw_mgr::VectorEngine>(index_path, dim, delta_ratio, params, dist_func);
+			return std::make_unique<ghnsw_mgr::VectorEngine>(
+				index_path, dim, delta_ratio, params, dist_func, lexical_config, autocomplete_config
+			);
 		}),
 		py::arg("index_path"),
 		py::arg("dim") = 0,
@@ -152,7 +183,10 @@ PYBIND11_MODULE(_brinicle, m) {
 		py::arg("ef_construction") = 200,
 		py::arg("ef_search") = 64,
 		py::arg("seed") = 0,
-		py::arg("dist_func") = "l2")
+		py::arg("dist_func") = "l2",
+		py::arg("lexical_config") = ghnsw::LexicalConfig(),
+		py::arg("autocomplete_config") = ghnsw::AutocompleteConfig()
+		)
 
 
 		.def("init", [](ghnsw_mgr::VectorEngine& self,
@@ -214,21 +248,31 @@ PYBIND11_MODULE(_brinicle, m) {
 		"Build from a vector file path.")
 
 
-		.def("delete_items", [](ghnsw_mgr::VectorEngine& self,
-								const std::vector<std::string>& external_ids,
-								bool return_not_found) {
-			std::vector<std::string> not_found;
-			std::size_t n = 0;
-			{
-				py::gil_scoped_release rel;
-				n = self.delete_external_ids(external_ids, return_not_found ? &not_found : nullptr);
-			}
-			if (return_not_found) return py::make_tuple(n, not_found);
-			return py::make_tuple(n, py::none());
-		},
-		py::arg("external_ids"),
-		py::arg("return_not_found") = false,
-		"Delete items by id.")
+		.def("delete_items",
+			[](ghnsw_mgr::VectorEngine& self,
+			   const std::vector<std::string>& external_ids,
+			   bool return_not_found) -> py::tuple {
+
+				std::vector<std::string> not_found;
+				std::size_t n = 0;
+
+				{
+					py::gil_scoped_release rel;
+					n = self.delete_external_ids(
+						external_ids,
+						return_not_found ? &not_found : nullptr
+					);
+				}
+
+				if (return_not_found)
+					return py::make_tuple(n, py::cast(not_found));
+
+				return py::make_tuple(n, py::none());
+			},
+			py::arg("external_ids"),
+			py::arg("return_not_found") = false,
+			"Delete items by id."
+		)
 
 
 		.def("rebuild_compact", [](ghnsw_mgr::VectorEngine& self,
@@ -254,7 +298,8 @@ PYBIND11_MODULE(_brinicle, m) {
 		.def("search", [](ghnsw_mgr::VectorEngine& self,
 						  const py::array& q,
 						  int k,
-						  int efs) {
+						  int efs,
+						  float threshold) {
 			check_f32_1d(q, "q");
 			auto a = py::array_t<float, py::array::c_style | py::array::forcecast>(q);
 			if ((std::size_t)a.shape(0) != self.dim())
@@ -263,19 +308,21 @@ PYBIND11_MODULE(_brinicle, m) {
 			std::vector<std::string> out;
 			{
 				py::gil_scoped_release rel;
-				out = self.search(a.data(), k, efs);
+				out = self.search(a.data(), k, efs, threshold);
 			}
 			return out;
 		},
-
 		py::arg("q"),
 		py::arg("k") = 10,
 		py::arg("efs") = 64,
+		py::arg("threshold") = std::numeric_limits<float>::infinity(),
 		"Search, and return external IDs")
+
 		.def("search_with_distance", [](ghnsw_mgr::VectorEngine& self,
 										const py::array& q,
 										int k,
-										int efs) {
+										int efs,
+										float threshold) {
 			check_f32_1d(q, "q");
 			auto a = py::array_t<float, py::array::c_style | py::array::forcecast>(q);
 
@@ -285,13 +332,14 @@ PYBIND11_MODULE(_brinicle, m) {
 			std::vector<std::pair<std::string, float>> out;
 			{
 				py::gil_scoped_release rel;
-				out = self.search_with_distance(a.data(), k, efs);
+				out = self.search_with_distance(a.data(), k, efs, threshold);
 			}
 			return out;
 		},
 		py::arg("q"),
 		py::arg("k") = 10,
 		py::arg("efs") = 64,
+		py::arg("threshold") = std::numeric_limits<float>::infinity(),
 		"Search, and return external IDs")
 
 		.def("needs_rebuild", &ghnsw_mgr::VectorEngine::needs_rebuild)

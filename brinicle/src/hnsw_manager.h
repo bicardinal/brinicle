@@ -13,6 +13,7 @@
 #include <cmath>
 #include <unordered_set>
 #include <errno.h>
+#include <limits>
 #include "hnsw.h"
 
 namespace ghnsw_mgr {
@@ -265,14 +266,17 @@ public:
 
 	VectorEngine(
 		std::string index_path,
-		std::size_t dim = 0, 
+		std::size_t dim = 0,
 		float delta_ratio = 0.10,
 		ghnsw::Params p = {},
-		std::string dist_func = "l2")
-	: base_index_path_(std::move(index_path)), 
-	  params_(p)
+		std::string dist_func = "l2",
+		ghnsw::LexicalConfig lexical_cfg = {},
+		ghnsw::AutocompleteConfig autocomplete_cfg = {})
+	: base_index_path_(std::move(index_path)),
+	  params_(p),
+	  lexical_cfg_(std::move(lexical_cfg)),
+	  autocomplete_cfg_(std::move(autocomplete_cfg))
 	{
-
 		if (delta_ratio <= 0.0f || delta_ratio > 0.5f) {
 			throw std::invalid_argument("delta_ratio must be in range (0, 0.5]");
 		}
@@ -284,19 +288,22 @@ public:
 		delta_path_ = base_index_path_ + ".delta";
 		lock_path_ = base_index_path_ + ".lock";
 		p.save_path = main_path_;
+
+		configure_scorers_once_();
+
 		bool iexists = false;
 		if (file_exists(main_path_)) {
-			main_idx_.reset(new ghnsw::Index(main_path_, params_.ef_search, dist_func));
+			main_idx_.reset(new ghnsw::Index(main_path_, params_.ef_search, dist_func_));
 			main_size_ = main_idx_->active_size();
 			main_mtime_ = file_mtime(main_path_);
 			dim_ = main_idx_->dim();
 			iexists = true;
 		}
-		if (dim <= 0 and !iexists) {
+		if (dim <= 0 && !iexists) {
 			throw std::invalid_argument("dim must be greater than 0");
 		}
 		if (file_exists(delta_path_)) {
-			delta_idx_.reset(new ghnsw::Index(delta_path_, params_.ef_search, dist_func));
+			delta_idx_.reset(new ghnsw::Index(delta_path_, params_.ef_search, dist_func_));
 			delta_size_ = delta_idx_->active_size();
 			delta_mtime_ = file_mtime(delta_path_);
 		}
@@ -307,7 +314,9 @@ public:
 	}
 
 
-	std::vector<std::string> search(const float* q, int k, int efs) {
+	std::vector<std::string> search(const float* q, const int k, const int efs,
+		float threshold = std::numeric_limits<float>::infinity()
+	) {
 		if (!main_idx_ && !delta_idx_) {
 			return {};
 		}
@@ -319,7 +328,7 @@ public:
 		if (main_idx_) {
 			auto pairs = main_idx_->query(q, k, efs);
 			for (const auto& p : pairs) {
-				if (!main_idx_->is_deleted(p.second)) {
+				if (!main_idx_->is_deleted(p.second) && p.first < threshold) {
 					all_results.push_back({p.first, main_idx_->external_id(p.second)});
 				}
 			}
@@ -328,7 +337,7 @@ public:
 		if (delta_idx_) {
 			auto pairs = delta_idx_->query(q, k, efs);
 			for (const auto& p : pairs) {
-				if (!delta_idx_->is_deleted(p.second)) {
+				if (!delta_idx_->is_deleted(p.second) && p.first < threshold) {
 					all_results.push_back({p.first, delta_idx_->external_id(p.second)});
 				}
 			}
@@ -350,7 +359,9 @@ public:
 	}
 
 	std::vector<std::pair<std::string, float>>
-	search_with_distance(const float* q, int k, int efs) {
+	search_with_distance(const float* q, const int k, const int efs,
+		float threshold = std::numeric_limits<float>::infinity()
+	) {
 		if (!main_idx_ && !delta_idx_) {
 			return {};
 		}
@@ -362,7 +373,7 @@ public:
 		if (main_idx_) {
 			auto pairs = main_idx_->query(q, k, efs);
 			for (const auto& p : pairs) {
-				if (!main_idx_->is_deleted(p.second)) {
+				if (!main_idx_->is_deleted(p.second) && p.first < threshold) {
 					all_results.push_back({
 						p.first,                       // distance
 						main_idx_->external_id(p.second)
@@ -374,7 +385,7 @@ public:
 		if (delta_idx_) {
 			auto pairs = delta_idx_->query(q, k, efs);
 			for (const auto& p : pairs) {
-				if (!delta_idx_->is_deleted(p.second)) {
+				if (!delta_idx_->is_deleted(p.second) && p.first < threshold) {
 					all_results.push_back({
 						p.first,                       // distance
 						delta_idx_->external_id(p.second)
@@ -966,6 +977,41 @@ private:
 		ghnsw::Index::fsync_dir_of(dest_path);
 	}
 
+
+	void configure_scorers_once_() {
+		if (dist_func_ == "lexical") {
+			ops::LexicalScorerConfig build_cfg;
+			build_cfg.w_title    = lexical_cfg_.build_title_weight;
+			build_cfg.w_attr     = lexical_cfg_.build_attr_weight;
+			build_cfg.w_brand    = lexical_cfg_.build_brand_weight;
+			build_cfg.w_category = lexical_cfg_.build_category_weight;
+			build_cfg.title_alpha = lexical_cfg_.build_title_alpha;
+			build_cfg.title_beta  = lexical_cfg_.build_title_beta;
+			build_cfg.category_penalty  = lexical_cfg_.build_category_penalty;
+			ops::set_build_lexical_config(build_cfg);
+
+			ops::LexicalScorerConfig search_cfg;
+			search_cfg.w_title    = lexical_cfg_.search_title_weight;
+			search_cfg.w_attr     = lexical_cfg_.search_attr_weight;
+			search_cfg.w_brand    = lexical_cfg_.search_brand_weight;
+			search_cfg.w_category = lexical_cfg_.search_category_weight;
+			search_cfg.title_alpha = lexical_cfg_.search_title_alpha;
+			search_cfg.title_beta  = lexical_cfg_.search_title_beta;
+			search_cfg.category_penalty  = lexical_cfg_.search_category_penalty;
+			ops::set_search_lexical_config(search_cfg);
+		} else if (dist_func_ == "autocomplete") {
+			ops::AutocompleteScorerConfig build_cfg;
+			build_cfg.length_penalty = autocomplete_cfg_.build_length_penalty;
+			build_cfg.position_decay = autocomplete_cfg_.build_position_decay;
+			ops::set_build_autocomplete_config(build_cfg);
+
+			ops::AutocompleteScorerConfig search_cfg;
+			search_cfg.length_penalty = autocomplete_cfg_.search_length_penalty;
+			search_cfg.position_decay = autocomplete_cfg_.search_position_decay;
+			ops::set_build_autocomplete_config(search_cfg);
+		}
+	}
+
 	std::string base_index_path_;
 	std::string main_path_;
 	std::string delta_path_;
@@ -991,6 +1037,9 @@ private:
 	PendingMode pending_mode_ = PendingMode::None;
 	std::string pending_vec_path_;
 	VectorIngestWriter writer_;
+
+	ghnsw::LexicalConfig lexical_cfg_;
+	ghnsw::AutocompleteConfig autocomplete_cfg_;
 
 };
 }

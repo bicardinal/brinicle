@@ -66,11 +66,27 @@ static inline void aligned_free64(void* p) {
 namespace ghnsw {
 
 using l2func_t = float(*)(const float* __restrict, const float* __restrict, std::size_t) noexcept;
-inline l2func_t l2_distance() noexcept { return &ops::l2_sqr; }
 
-inline l2func_t lexical_distance() noexcept {
-    return &ops::lexical_structured_distance;
+inline l2func_t l2_distance() noexcept {
+	return &ops::l2_sqr;
 }
+
+inline l2func_t lexical_distance_build() noexcept {
+	return &ops::lexical_structured_distance_build;
+}
+
+inline l2func_t lexical_distance_search() noexcept {
+	return &ops::lexical_structured_distance_search;
+}
+
+inline l2func_t autocomplete_distance_build() noexcept {
+	return &ops::autocomplete_distance_build;
+}
+
+inline l2func_t autocomplete_distance_search() noexcept {
+	return &ops::autocomplete_distance_search;
+}
+
 
 using Pair = std::pair<float,uint32_t>;
 
@@ -83,6 +99,35 @@ struct Params {
 	std::string save_path = "index.ghnsw";
 };
 
+struct LexicalConfig {
+	float build_title_weight    = 0.55f;
+	float build_attr_weight     = 0.15f;
+	float build_brand_weight    = 0.20f;
+	float build_category_weight = 0.10f;
+	float build_category_penalty = 1e8f;
+
+	float search_title_weight    = 0.55f;
+	float search_attr_weight     = 0.15f;
+	float search_brand_weight    = 0.20f;
+	float search_category_weight = 0.10f;
+	float search_category_penalty = 3.0f;
+
+	// build scorer title Tversky. (1,1) == Jaccard
+	float build_title_alpha = 1.0f;
+	float build_title_beta  = 1.0f;
+
+	// search scorer title Tversky
+	float search_title_alpha = 1.0f;
+	float search_title_beta  = 1.0f;
+};
+
+struct AutocompleteConfig {
+	float search_length_penalty = 0.2f;
+	float search_position_decay = 0.5f;
+
+	float build_length_penalty = 0.2f;
+	float build_position_decay = 0.5f;
+};
 
 struct MMapRegion {
 	uint8_t* data = nullptr;
@@ -255,9 +300,6 @@ struct HeapNode {
 class Index {
 public:
 	Index() = default;
-	inline float dist(const float* __restrict a, const float* __restrict b) const noexcept {
-		return l2_(a, b, d_);
-	}
 
 	Index(const std::string& vectors_path,
 		  const std::vector<std::string>& external_ids,
@@ -275,9 +317,14 @@ public:
 		if (n_ == 0 || d_ == 0) throw std::runtime_error("fit: empty dataset");
 
 		if (dist_func == "l2") {
-			l2_ = l2_distance();
+			scorer_ = l2_distance();
+			scorer_search_ = l2_distance();
 		} else if (dist_func == "lexical") {
-			l2_ = lexical_distance();
+			scorer_ = lexical_distance_build();
+			scorer_search_ = lexical_distance_search();
+		} else if (dist_func == "autocomplete") {
+			scorer_ = autocomplete_distance_build();
+			scorer_search_ = autocomplete_distance_search();
 		} else {
 			throw std::runtime_error("invalid distance function name.");
 		}
@@ -330,9 +377,14 @@ public:
 	) {
 
 		if (dist_func == "l2") {
-			l2_ = l2_distance();
+			scorer_ = l2_distance();
+			scorer_search_ = l2_distance();
 		} else if (dist_func == "lexical") {
-			l2_ = lexical_distance();
+			scorer_ = lexical_distance_search();
+			scorer_search_ = lexical_distance_search();
+		} else if (dist_func == "autocomplete") {
+			scorer_ = autocomplete_distance_search();
+			scorer_search_ = autocomplete_distance_search();
 		} else {
 			throw std::runtime_error("invalid distance function name.");
 		}
@@ -474,6 +526,9 @@ public:
 	void fit() {
 		for (size_t i = 0; i < n_; ++i) {
 			insert(i);
+			if (i%20000 == 0) {
+				printf("%ld\n", i);
+			}
 		}
 
 		save_mmap_from_pools(P_.save_path, /*copy_vectors=*/true);
@@ -496,7 +551,7 @@ public:
 		ws.next_tag();
 		ws.prepare_heaps(ef);
 		uint32_t ep = entry_point_;
-		float cur_dist = l2_(vec0(ep), q_in, d_);
+		float cur_dist = scorer_search_(q_in, vec0(ep), d_); // the order of feeding is really important for lexical case
 
 		for (int l = max_level_; l >= 0; --l) {
 			bool changed = true;
@@ -509,7 +564,7 @@ public:
 						GHNSW_PREFETCH(vec0(*(p + 4)));
 					}
 					const uint32_t nb = *p;
-					float d_nb = l2_(q_in, vec0(nb), d_);
+					float d_nb = scorer_search_(q_in, vec0(nb), d_);
 					if (d_nb < cur_dist) {
 						cur_dist = d_nb;
 						ep = nb;
@@ -561,7 +616,7 @@ public:
 				if (ws.is_visited(nb)) continue;
 				ws.mark_visited(nb);
 
-				const float d_nb = l2_(q_in, vec0(nb), l0_.d);
+				const float d_nb = scorer_search_(q_in, vec0(nb), l0_.d);
 
 				if (ws.best_heap.size() < ef || d_nb < worst_best) {
 					ws.cand_heap.push_back({d_nb, nb});
@@ -953,7 +1008,7 @@ private:
 		const float* qi = vecX((uint32_t)i);
 
 		uint32_t ep = static_cast<uint32_t>(entry_point_);
-		float cur_dist = l2_(qi, vecX(ep), d_);
+		float cur_dist = scorer_(qi, vecX(ep), d_);
 		for (int l = max_level_; l > clevel; --l)
 		{
 			bool changed = true;
@@ -963,7 +1018,7 @@ private:
 				for (const uint32_t* p = beg; p != end; ++p) {
 					uint32_t nb = *p;
 					if (is_deleted(nb)) continue;
-					float d = l2_(qi, vecX(nb), d_);
+					float d = scorer_(qi, vecX(nb), d_);
 					if (d < cur_dist) {
 						cur_dist = d; ep = nb; changed = true;
 					}
@@ -987,7 +1042,7 @@ private:
 			std::priority_queue<Pair> cand_heap;
 			std::priority_queue<Pair> best_heap;
 			mark_visited(ep);
-			cur_dist = l2_(qi, vecX(ep), d_);
+			cur_dist = scorer_(qi, vecX(ep), d_);
 			cand_heap.emplace(-cur_dist, ep);
 			best_heap.emplace(cur_dist, ep);
 			float worst_best = cur_dist;
@@ -1002,7 +1057,7 @@ private:
 					uint32_t nb = *p;
 					if (is_visited(nb) or is_deleted(nb)) continue;
 					mark_visited(nb);
-					float d_nb = l2_(qi, vecX(nb), d_);
+					float d_nb = scorer_(qi, vecX(nb), d_);
 					if (best_heap.size() < P_.ef_construction || worst_best > d_nb) {
 						cand_heap.emplace(-d_nb, nb);
 						best_heap.emplace(d_nb, nb);
@@ -1299,7 +1354,7 @@ private:
 		for (uint32_t cid : candidates) {
 			if (cid == query_id) continue;
 			if (is_deleted(cid)) continue;
-			const float dq = l2_(vecX(cid), qv, d_);
+			const float dq = scorer_(vecX(cid), qv, d_);
 			scored.push_back({dq, cid});
 		}
 
@@ -1313,7 +1368,7 @@ private:
 
 			bool good = true;
 			for (uint32_t sid : selected) {
-				const float dc_s = l2_(cv, vecX(sid), d_);
+				const float dc_s = scorer_(cv, vecX(sid), d_);
 				if (dc_s < dq_c) { good = false; break; }
 			}
 
@@ -1332,7 +1387,8 @@ private:
 	std::size_t M0_ = 0;
 	double mult_{0.0};
 
-	l2func_t l2_ = nullptr;
+	l2func_t scorer_ = nullptr;
+	l2func_t scorer_search_ = nullptr;
 
 
 	mutable std::vector<uint32_t> visited_tag_;
