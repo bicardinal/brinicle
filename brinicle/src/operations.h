@@ -282,7 +282,7 @@ inline void dot_mat_vec(const float* Mat,
 struct LexicalScorerConfig {
 	float w_title    = 0.55f;
 	float w_attr     = 0.15f;
-	float w_brand    = 0.20f;
+	float w_subcategory = 0.20f;
 	float w_category = 0.10f;
 
 	// Tversky on title. alpha=beta=1 => Jaccard.
@@ -501,10 +501,12 @@ namespace {
 		std::size_t a_attr_n = clamp_count(static_cast<std::size_t>(a[2]), payload - a_title_n);
 		std::size_t b_attr_n = clamp_count(static_cast<std::size_t>(b[2]), payload - b_title_n);
 
-		const std::uint32_t a_brand    = as_id(a[3]);
-		const std::uint32_t b_brand    = as_id(b[3]);
-		const std::uint32_t a_category = as_id(a[4]);
-		const std::uint32_t b_category = as_id(b[4]);
+		const std::uint32_t a_category = as_id(a[3]);
+		const std::uint32_t b_category = as_id(b[3]);
+
+		const std::uint32_t a_subcategory    = as_id(a[4]);
+		const std::uint32_t b_subcategory    = as_id(b[4]);
+
 
 		const float* a_title = a + kHeaderSize;
 		const float* b_title = b + kHeaderSize;
@@ -520,14 +522,15 @@ namespace {
 
 		// keep attrs simple for now
 		const float attr_dist = attribute_distance(a_attr, a_attr_n, b_attr, b_attr_n, search_time);
-		const float brand_dist = id_distance(a_brand, b_brand, cfg.category_penalty);
-		const float cat_dist   = id_distance(a_category, b_category, cfg.category_penalty);
+
+		const float category_dist   = id_distance(a_category, b_category, cfg.category_penalty);
+		const float subcategory_dist = id_distance(a_subcategory, b_subcategory, cfg.category_penalty);
 
 		return
 			cfg.w_title    * title_dist +
 			cfg.w_attr     * attr_dist +
-			cfg.w_brand    * brand_dist +
-			cfg.w_category * cat_dist;
+			cfg.w_subcategory * subcategory_dist +
+			cfg.w_category * category_dist;
 	}
 
 	inline float autocomplete_distance_impl(

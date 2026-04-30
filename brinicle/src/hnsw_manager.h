@@ -505,7 +505,7 @@ public:
 		}
 
 		writer_.finalize();
-		const std::string tmp_prefix_base = "brinicletmp";
+		const std::string tmp_prefix_base = default_tmp_prefix_base_();
 		if (build_params.M <= 0) build_params = params_;
 
 		const size_t new_vectors = writer_.n();
@@ -574,10 +574,13 @@ public:
 	void build_from_file(const std::string& vectors_path,
 		const std::vector<std::string>& external_ids,
 		ghnsw::Params build_params = {},
-		const std::string& tmp_prefix = "brinicletmp",
+		const std::string& tmp_prefix = "",
 		bool delete_vectors_after = true)
 	{
+
 		CombinedLock lock(lock_path_);
+		const std::string tmp_base =
+			tmp_prefix.empty() ? default_tmp_prefix_base_() : tmp_prefix;
 
 		if (build_params.M == 0) build_params = params_;
 
@@ -585,7 +588,7 @@ public:
 		const std::string tmp_main = unique_temp_file(delta_path_, ".new");
 		build_params.save_path = tmp_main;
 
-		const std::string tmp = unique_temp_file(tmp_prefix);
+		const std::string tmp = unique_temp_file(tmp_base);
 
 		{
 			ghnsw::Index builder(vectors_path, external_ids, dim_, build_params, tmp, dist_func_);
@@ -609,8 +612,14 @@ public:
 	}
 
 	// remove deleted, keep only alive, then rebuild entirely
-	void rebuild_compact(ghnsw::Params build_params = {}, const std::string& tmp_prefix_base = "brinicletmp") {
+	void rebuild_compact(
+		ghnsw::Params build_params = {},
+		const std::string& tmp_prefix_base = ""
+	) {
 		CombinedLock lock(lock_path_);
+		const std::string tmp_base =
+			tmp_prefix_base.empty() ? default_tmp_prefix_base_() : tmp_prefix_base;
+
 		force_reload_indices();
 		ensure_has_any_index();
 
@@ -620,7 +629,7 @@ public:
 		const std::string tmp_main = unique_temp_file(main_path_, ".new");
 		build_params.save_path = tmp_main;
 
-		const std::string tmp_prefix = unique_temp_file(tmp_prefix_base);
+		const std::string tmp_prefix = unique_temp_file(tmp_base);
 		const std::string alive_vec_path = unique_temp_file(base_index_path_, ".compact.vec.tmp");
 
 		std::vector<std::string> alive_ids;
@@ -706,7 +715,7 @@ public:
 		}
 
 		if (needs_rebuild()) {
-			merge_delta_and_rebuild(params_, "brinicletmp", /*include_writer=*/false);
+			merge_delta_and_rebuild(params_, default_tmp_prefix_base_(), /*include_writer=*/false);
 		}
 	}
 
@@ -817,6 +826,10 @@ private:
 	void update_mtimes() {
 		main_mtime_ = file_exists(main_path_) ? file_mtime(main_path_) : 0;
 		delta_mtime_ = file_exists(delta_path_) ? file_mtime(delta_path_) : 0;
+	}
+
+	std::string default_tmp_prefix_base_() const {
+		return base_index_path_ + ".tmp";
 	}
 
 	void cleanup_orphaned_temps() {
@@ -983,7 +996,7 @@ private:
 			ops::LexicalScorerConfig build_cfg;
 			build_cfg.w_title    = lexical_cfg_.build_title_weight;
 			build_cfg.w_attr     = lexical_cfg_.build_attr_weight;
-			build_cfg.w_brand    = lexical_cfg_.build_brand_weight;
+			build_cfg.w_subcategory    = lexical_cfg_.build_subcategory_weight;
 			build_cfg.w_category = lexical_cfg_.build_category_weight;
 			build_cfg.title_alpha = lexical_cfg_.build_title_alpha;
 			build_cfg.title_beta  = lexical_cfg_.build_title_beta;
@@ -993,7 +1006,7 @@ private:
 			ops::LexicalScorerConfig search_cfg;
 			search_cfg.w_title    = lexical_cfg_.search_title_weight;
 			search_cfg.w_attr     = lexical_cfg_.search_attr_weight;
-			search_cfg.w_brand    = lexical_cfg_.search_brand_weight;
+			search_cfg.w_subcategory = lexical_cfg_.search_subcategory_weight;
 			search_cfg.w_category = lexical_cfg_.search_category_weight;
 			search_cfg.title_alpha = lexical_cfg_.search_title_alpha;
 			search_cfg.title_beta  = lexical_cfg_.search_title_beta;
@@ -1008,7 +1021,7 @@ private:
 			ops::AutocompleteScorerConfig search_cfg;
 			search_cfg.length_penalty = autocomplete_cfg_.search_length_penalty;
 			search_cfg.position_decay = autocomplete_cfg_.search_position_decay;
-			ops::set_build_autocomplete_config(search_cfg);
+			ops::set_search_autocomplete_config(search_cfg);
 		}
 	}
 

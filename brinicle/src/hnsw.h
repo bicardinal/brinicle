@@ -102,13 +102,13 @@ struct Params {
 struct LexicalConfig {
 	float build_title_weight    = 0.55f;
 	float build_attr_weight     = 0.15f;
-	float build_brand_weight    = 0.20f;
+	float build_subcategory_weight    = 0.20f;
 	float build_category_weight = 0.10f;
 	float build_category_penalty = 1e8f;
 
 	float search_title_weight    = 0.55f;
 	float search_attr_weight     = 0.15f;
-	float search_brand_weight    = 0.20f;
+	float search_subcategory_weight    = 0.20f;
 	float search_category_weight = 0.10f;
 	float search_category_penalty = 3.0f;
 

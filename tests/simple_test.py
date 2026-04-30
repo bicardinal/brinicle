@@ -59,7 +59,9 @@ class VectorEngineSimpleTests:
         k = n
         X = np.random.randn(n, D).astype(np.float32)
         Q = np.random.randn(D).astype(np.float32)
-        engine = brinicle.VectorEngine(self._get_test_path("empty_id"), dim=D, delta_ratio=0.1)
+        engine = brinicle.VectorEngine(
+            self._get_test_path("empty_id"), dim=D, delta_ratio=0.1
+        )
         engine.init(mode="build")
         for eid in range(n):
             engine.ingest(str(eid), X[eid])
@@ -68,7 +70,9 @@ class VectorEngineSimpleTests:
 
         assert len(search) == k, "invalid search length"
         assert sorted(search) == [i for i in range(k)], "invalid ids"
-        assert len(set(search)) == k, "duplicate results" # to see if there are duplicates
+        assert (
+            len(set(search)) == k
+        ), "duplicate results"  # to see if there are duplicates
 
         Y = np.random.randn(5, D).astype(np.float32)
         engine.init(mode="insert")
@@ -78,9 +82,12 @@ class VectorEngineSimpleTests:
         search = engine.search(Q, k=n + 5)
 
         assert len(search) == n + 5, "invalid search length"
-        assert len(set(search)) == n + 5, "duplicate results" # to see if there are duplicates
-        assert sorted(search) == sorted([str(i) for i in range(n)] + [str(i) + 'x' for i in range(5)]), "invalid ids" # to see if new inserts appear in the results.
-
+        assert (
+            len(set(search)) == n + 5
+        ), "duplicate results"  # to see if there are duplicates
+        assert sorted(search) == sorted(
+            [str(i) for i in range(n)] + [str(i) + "x" for i in range(5)]
+        ), "invalid ids"  # to see if new inserts appear in the results.
 
 
 if __name__ == "__main__":

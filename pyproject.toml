@@ -1,6 +1,6 @@
 [project]
 name = "brinicle"
-version = "0.0.4"
+version = "0.0.5"
 description = "brinicle is a C++ vector index engine (ANN library) optimized for disk-first, low-RAM similarity search."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,10 +28,13 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules"
 ]
 
-dependencies = []
+dependencies = [
+  "numpy",
+  "tokenizers"
+]
 
 [project.optional-dependencies]
-server = ["fastapi", "uvicorn[standard]", "pydantic", "python-multipart", "orjson", "numpy"]
+server = ["fastapi", "uvicorn[standard]", "pydantic", "python-multipart"]
 
 [project.urls]
 Homepage = "https://github.com/bicardinal/brinicle"

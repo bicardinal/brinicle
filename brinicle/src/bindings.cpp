@@ -133,12 +133,12 @@ PYBIND11_MODULE(_brinicle, m) {
 		.def(py::init<>())
 		.def_readwrite("build_title_weight", &ghnsw::LexicalConfig::build_title_weight)
 		.def_readwrite("build_attr_weight", &ghnsw::LexicalConfig::build_attr_weight)
-		.def_readwrite("build_brand_weight", &ghnsw::LexicalConfig::build_brand_weight)
+		.def_readwrite("build_subcategory_weight", &ghnsw::LexicalConfig::build_subcategory_weight)
 		.def_readwrite("build_category_weight", &ghnsw::LexicalConfig::build_category_weight)
 		.def_readwrite("build_category_penalty", &ghnsw::LexicalConfig::build_category_penalty)
 		.def_readwrite("search_title_weight", &ghnsw::LexicalConfig::search_title_weight)
 		.def_readwrite("search_attr_weight", &ghnsw::LexicalConfig::search_attr_weight)
-		.def_readwrite("search_brand_weight", &ghnsw::LexicalConfig::search_brand_weight)
+		.def_readwrite("search_subcategory_weight", &ghnsw::LexicalConfig::search_subcategory_weight)
 		.def_readwrite("search_category_weight", &ghnsw::LexicalConfig::search_category_weight)
 		.def_readwrite("search_category_penalty", &ghnsw::LexicalConfig::search_category_penalty)
 		.def_readwrite("build_title_alpha", &ghnsw::LexicalConfig::build_title_alpha)
@@ -289,7 +289,7 @@ PYBIND11_MODULE(_brinicle, m) {
 			self.rebuild_compact(params);
 		},
 		py::arg("M") = 16,
-		py::arg("ef_construction") = 16,
+		py::arg("ef_construction") = 200,
 		py::arg("ef_search") = 64,
 		py::arg("seed") = 0,
 		"Rebuild the index and clean up segments.")
