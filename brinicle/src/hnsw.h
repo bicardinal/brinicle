@@ -117,8 +117,10 @@ struct LexicalConfig {
 	float build_title_beta  = 1.0f;
 
 	// search scorer title Tversky
+	// float search_title_alpha = 1.0f;
+	// float search_title_beta  = 1.0f;
 	float search_title_alpha = 1.0f;
-	float search_title_beta  = 1.0f;
+	float search_title_beta  = 0.06f;
 };
 
 struct AutocompleteConfig {

@@ -498,8 +498,11 @@ namespace {
 		std::size_t a_title_n = clamp_count(static_cast<std::size_t>(a[1]), payload);
 		std::size_t b_title_n = clamp_count(static_cast<std::size_t>(b[1]), payload);
 
-		std::size_t a_attr_n = clamp_count(static_cast<std::size_t>(a[2]), payload - a_title_n);
-		std::size_t b_attr_n = clamp_count(static_cast<std::size_t>(b[2]), payload - b_title_n);
+		std::size_t a_attr_n =
+			clamp_count(static_cast<std::size_t>(a[2]), (payload - a_title_n) / 2);
+
+		std::size_t b_attr_n =
+			clamp_count(static_cast<std::size_t>(b[2]), (payload - b_title_n) / 2);
 
 		const std::uint32_t a_category = as_id(a[3]);
 		const std::uint32_t b_category = as_id(b[3]);
