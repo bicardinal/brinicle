@@ -2,9 +2,7 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 #include <limits>
-#include "hnsw.h"
 #include "hnsw_manager.h"
-
 #include "knn.h"
 
 
@@ -50,7 +48,7 @@ PYBIND11_MODULE(_brinicle, m) {
 	);
 
 
-	m.def("dot",
+	m.def("dot_product",
 	[](const py::array_t<float, py::array::c_style | py::array::forcecast>& a,
 	   const py::array_t<float, py::array::c_style | py::array::forcecast>& b) -> float {
 		if (a.ndim() != 1 || b.ndim() != 1) {
@@ -63,7 +61,7 @@ PYBIND11_MODULE(_brinicle, m) {
 		const float* a_ptr = static_cast<const float*>(a.request().ptr);
 		const float* b_ptr = static_cast<const float*>(b.request().ptr);
 		std::size_t dim = static_cast<std::size_t>(a.shape(0));
-		return ops::dot(a_ptr, b_ptr, dim);
+		return ops::dot_product(a_ptr, b_ptr, dim);
 	},
 	py::arg("a"), py::arg("b"),
 	"Compute dot product between two vectors"
@@ -126,6 +124,7 @@ PYBIND11_MODULE(_brinicle, m) {
 		.def_readwrite("M", &ghnsw::Params::M)
 		.def_readwrite("ef_construction", &ghnsw::Params::ef_construction)
 		.def_readwrite("ef_search", &ghnsw::Params::ef_search)
+		.def_readwrite("build_n_threads", &ghnsw::Params::build_n_threads)
 		.def_readwrite("rng_seed", &ghnsw::Params::rng_seed);
 
 
@@ -133,18 +132,22 @@ PYBIND11_MODULE(_brinicle, m) {
 		.def(py::init<>())
 		.def_readwrite("build_title_weight", &ghnsw::LexicalConfig::build_title_weight)
 		.def_readwrite("build_attr_weight", &ghnsw::LexicalConfig::build_attr_weight)
-		.def_readwrite("build_subcategory_weight", &ghnsw::LexicalConfig::build_subcategory_weight)
 		.def_readwrite("build_category_weight", &ghnsw::LexicalConfig::build_category_weight)
+		.def_readwrite("build_subcategory_weight", &ghnsw::LexicalConfig::build_subcategory_weight)
+		.def_readwrite("build_vector_weight", &ghnsw::LexicalConfig::build_vector_weight)
 		.def_readwrite("build_category_penalty", &ghnsw::LexicalConfig::build_category_penalty)
-		.def_readwrite("search_title_weight", &ghnsw::LexicalConfig::search_title_weight)
-		.def_readwrite("search_attr_weight", &ghnsw::LexicalConfig::search_attr_weight)
-		.def_readwrite("search_subcategory_weight", &ghnsw::LexicalConfig::search_subcategory_weight)
-		.def_readwrite("search_category_weight", &ghnsw::LexicalConfig::search_category_weight)
-		.def_readwrite("search_category_penalty", &ghnsw::LexicalConfig::search_category_penalty)
 		.def_readwrite("build_title_alpha", &ghnsw::LexicalConfig::build_title_alpha)
 		.def_readwrite("build_title_beta", &ghnsw::LexicalConfig::build_title_beta)
+
+		.def_readwrite("search_title_weight", &ghnsw::LexicalConfig::search_title_weight)
+		.def_readwrite("search_attr_weight", &ghnsw::LexicalConfig::search_attr_weight)
+		.def_readwrite("search_category_weight", &ghnsw::LexicalConfig::search_category_weight)
+		.def_readwrite("search_category_penalty", &ghnsw::LexicalConfig::search_category_penalty)
+		.def_readwrite("search_subcategory_weight", &ghnsw::LexicalConfig::search_subcategory_weight)
+		.def_readwrite("search_vector_weight", &ghnsw::LexicalConfig::search_vector_weight)
 		.def_readwrite("search_title_alpha", &ghnsw::LexicalConfig::search_title_alpha)
-		.def_readwrite("search_title_beta", &ghnsw::LexicalConfig::search_title_beta);
+		.def_readwrite("search_title_beta", &ghnsw::LexicalConfig::search_title_beta)
+		.def_readwrite("vector_normalized", &ghnsw::LexicalConfig::vector_normalized);
 
 
 	py::class_<ghnsw::AutocompleteConfig>(m, "AutocompleteConfig")
@@ -162,6 +165,7 @@ PYBIND11_MODULE(_brinicle, m) {
 						 std::size_t M,
 						 std::size_t ef_construction,
 						 std::size_t ef_search,
+						 std::size_t build_n_threads,
 						 std::size_t seed,
 						 const std::string& dist_func,
 						 const ghnsw::LexicalConfig& lexical_config,
@@ -170,6 +174,7 @@ PYBIND11_MODULE(_brinicle, m) {
 			params.M = M;
 			params.ef_construction = ef_construction;
 			params.ef_search = ef_search;
+			params.build_n_threads = build_n_threads;
 			params.rng_seed = seed;
 			py::gil_scoped_release rel;
 			return std::make_unique<ghnsw_mgr::VectorEngine>(
@@ -182,6 +187,7 @@ PYBIND11_MODULE(_brinicle, m) {
 		py::arg("M") = 16,
 		py::arg("ef_construction") = 200,
 		py::arg("ef_search") = 64,
+		py::arg("build_n_threads") = 1,
 		py::arg("seed") = 0,
 		py::arg("dist_func") = "l2",
 		py::arg("lexical_config") = ghnsw::LexicalConfig(),
@@ -218,11 +224,13 @@ PYBIND11_MODULE(_brinicle, m) {
 						std::size_t M,
 						std::size_t ef_construction,
 						std::size_t ef_search,
+						std::size_t build_n_threads,
 						std::size_t seed) {
 			ghnsw::Params params;
 			params.M = M;
 			params.ef_construction = ef_construction;
 			params.ef_search = ef_search;
+			params.build_n_threads = build_n_threads;
 			params.rng_seed = seed;
 			py::gil_scoped_release rel;
 			self.finalize(params, optimize);
@@ -231,6 +239,7 @@ PYBIND11_MODULE(_brinicle, m) {
 		py::arg("M") = 0, // it means use the initialized params as default
 		py::arg("ef_construction") = 0,
 		py::arg("ef_search") = 0,
+		py::arg("build_n_threads") = 0,
 		py::arg("seed") = 0,
 		"Finalize ingest and build/insert/upsert depending on init(mode).")
 
@@ -279,11 +288,13 @@ PYBIND11_MODULE(_brinicle, m) {
 						std::size_t M = 16,
 						std::size_t ef_construction = 200,
 						std::size_t ef_search = 64,
+						std::size_t build_n_threads = 1,
 						std::size_t seed = 0) {
 			ghnsw::Params params;
 			params.M = M;
 			params.ef_construction = ef_construction;
 			params.ef_search = ef_search;
+			params.build_n_threads = build_n_threads;
 			params.rng_seed = seed;
 			py::gil_scoped_release rel;
 			self.rebuild_compact(params);
@@ -291,6 +302,7 @@ PYBIND11_MODULE(_brinicle, m) {
 		py::arg("M") = 16,
 		py::arg("ef_construction") = 200,
 		py::arg("ef_search") = 64,
+		py::arg("build_n_threads") = 1,
 		py::arg("seed") = 0,
 		"Rebuild the index and clean up segments.")
 
@@ -318,6 +330,44 @@ PYBIND11_MODULE(_brinicle, m) {
 		py::arg("threshold") = std::numeric_limits<float>::infinity(),
 		"Search, and return external IDs")
 
+		.def("search_batch", [](ghnsw_mgr::VectorEngine& self,
+								const py::array& Q,
+								int k,
+								int efs,
+								float threshold,
+								int n_jobs) {
+			check_f32_2d(Q, "Q");
+
+			auto a = py::array_t<float, py::array::c_style | py::array::forcecast>(Q);
+
+			if ((std::size_t)a.shape(1) != self.dim()) {
+				throw std::runtime_error("search_batch: dimension mismatch");
+			}
+
+			std::size_t nq = static_cast<std::size_t>(a.shape(0));
+
+			std::vector<std::vector<std::string>> out;
+
+			{
+				py::gil_scoped_release rel;
+				out = self.search_batch(
+					a.data(),
+					nq,
+					k,
+					efs,
+					threshold,
+					n_jobs
+				);
+			}
+
+			return out;
+		},
+		py::arg("Q"),
+		py::arg("k") = 10,
+		py::arg("efs") = 64,
+		py::arg("threshold") = std::numeric_limits<float>::infinity(),
+		py::arg("n_jobs") = 1,
+		"Batch search, and return external IDs for each query")
 		.def("search_with_distance", [](ghnsw_mgr::VectorEngine& self,
 										const py::array& q,
 										int k,

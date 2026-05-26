@@ -38,11 +38,16 @@ class AutocompleteEngine:
         M: int = 16,
         ef_construction: int = 200,
         ef_search: int = 64,
+        n_threads: int = 1,  # for build
+        batch_size: int = 1,  # for build
         seed: int = 0,
         autocomplete_config: AutocompleteConfig | None = None,
     ) -> None:
         if dim <= 1:
             raise ValueError("dim must be greater than 1")
+
+        self.n_threads = n_threads
+        self.batch_size = batch_size
 
         self.index_path = str(index_path)
         self._dim = int(dim)
@@ -67,8 +72,10 @@ class AutocompleteEngine:
             M,
             ef_construction,
             ef_search,
-            seed,
-            "autocomplete",
+            n_threads=n_threads,
+            batch_size=batch_size,
+            seed=seed,
+            dist_func="autocomplete",
             autocomplete_config=self.autocomplete_config,
         )
 
@@ -103,6 +110,8 @@ class AutocompleteEngine:
         M: int = 0,
         ef_construction: int = 0,
         ef_search: int = 0,
+        n_jobs: int = 0,
+        batch_size: int = 0,
         seed: int = 0,
     ) -> None:
         self._engine.finalize(
@@ -110,6 +119,8 @@ class AutocompleteEngine:
             M=M,
             ef_construction=ef_construction,
             ef_search=ef_search,
+            n_jobs=n_jobs,
+            batch_size=batch_size,
             seed=seed,
         )
 

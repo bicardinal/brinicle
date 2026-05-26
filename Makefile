@@ -49,8 +49,9 @@ docker-run:
 	  -v ./brinicle_data:/app/data \
 	  -e PYTHONUNBUFFERED=1 \
 	  -e LOG_LEVEL=INFO \
-	  --memory="1g" \
-	  --cpus="2.0"  \
+	  --memory="16gb" \
+	  --memory-swap="16gb" \
+	  --cpus="16"  \
 	  --restart unless-stopped \
 	  $(DOCKER_IMAGE)
 	@echo "Container started. API available at http://localhost:$(PORT)"

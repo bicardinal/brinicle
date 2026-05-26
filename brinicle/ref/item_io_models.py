@@ -1,17 +1,25 @@
-from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
+
+from pydantic import BaseModel
 
 
 class HnswParams(BaseModel):
     M: int = 48
     ef_construction: int = 1024
     ef_search: int = 512
-    rng_seed: int = 123
+    build_n_threads: int = 1
+    alpha: float = 0.95
+    seed: int = 0
 
 
 class CreateItemIndexRequest(BaseModel):
     index_name: str
     dim: int
+    vector_dim: int = 0
+    vector_normalized: bool = False
     params: Optional[HnswParams] = None
 
     # Optional future controls.
@@ -21,9 +29,12 @@ class CreateItemIndexRequest(BaseModel):
 class LoadItemIndexRequest(BaseModel):
     index_name: str
     dim: int
+    vector_dim: int = 0
+    vector_normalized: bool = False
     params: Optional[HnswParams] = None
     # Optional future controls.
     tokenizer_path: Optional[str] = None
+
 
 class InitItemRequest(BaseModel):
     index_name: str
@@ -32,6 +43,7 @@ class InitItemRequest(BaseModel):
 
 class FinalizeItemRequest(BaseModel):
     index_name: str
+    params: Optional[HnswParams] = None
 
 
 class ItemDocument(BaseModel):
@@ -57,14 +69,26 @@ class SearchItemRequest(BaseModel):
 
     query: Optional[str] = None
 
-    # For structured search later.
-    title: Optional[str] = None
     category: Optional[str] = ""
     subcategory: Optional[str] = ""
     attributes: Optional[Dict] = None
 
     k: int = 10
     ef_search: Optional[int] = None
+
+
+class SearchBatchItemRequest(BaseModel):
+    index_name: str
+    queries: List[str]
+
+    k: int = 10
+    ef_search: Optional[int] = None
+
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    attributes: Optional[dict[str, Any]] = None
+
+    n_jobs: int = 1
 
 
 class SearchItemResult(BaseModel):

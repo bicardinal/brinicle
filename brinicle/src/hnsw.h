@@ -23,6 +23,16 @@
 #include "operations.h"
 #include <sys/file.h>
 
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <shared_mutex>
+#include <memory>
+
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #if defined(__GNUC__) || defined(__clang__)
   #define PREFETCH_R(addr, lvl) __builtin_prefetch((addr), 0, (lvl))
@@ -56,10 +66,6 @@ static inline void aligned_free64(void* p) {
 
 
 
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
 
 
 
@@ -69,6 +75,14 @@ using l2func_t = float(*)(const float* __restrict, const float* __restrict, std:
 
 inline l2func_t l2_distance() noexcept {
 	return &ops::l2_sqr;
+}
+
+inline l2func_t cosine_distance() noexcept {
+	return &ops::cosine_distance;
+}
+
+inline l2func_t dot_product_distance() noexcept {
+	return &ops::dot_product;
 }
 
 inline l2func_t lexical_distance_build() noexcept {
@@ -96,31 +110,36 @@ struct Params {
 	int ef_search = 64;
 	uint64_t rng_seed = 124;
 	int k_base = 2;
+	uint32_t build_n_threads = 1;
 	std::string save_path = "index.ghnsw";
 };
 
 struct LexicalConfig {
-	float build_title_weight    = 0.55f;
-	float build_attr_weight     = 0.15f;
-	float build_subcategory_weight    = 0.20f;
+	float build_title_weight    = 0.45f;
+	float build_attr_weight     = 0.10f;
 	float build_category_weight = 0.10f;
-	float build_category_penalty = 1e8f;
+	float build_subcategory_weight = 0.15f;
+	float build_vector_weight      = 0.20f;
 
-	float search_title_weight    = 0.55f;
-	float search_attr_weight     = 0.15f;
-	float search_subcategory_weight    = 0.20f;
+	float build_category_penalty = 1.0f;
+
+	float search_title_weight    = 0.45f;
+	float search_attr_weight     = 0.10f;
 	float search_category_weight = 0.10f;
-	float search_category_penalty = 3.0f;
+	float search_subcategory_weight = 0.15f;
+	float search_vector_weight      = 0.20f;
+
+	float search_category_penalty = 1.0f;
 
 	// build scorer title Tversky. (1,1) == Jaccard
 	float build_title_alpha = 1.0f;
 	float build_title_beta  = 1.0f;
 
 	// search scorer title Tversky
-	// float search_title_alpha = 1.0f;
-	// float search_title_beta  = 1.0f;
 	float search_title_alpha = 1.0f;
 	float search_title_beta  = 0.06f;
+
+	bool vector_normalized = false;
 };
 
 struct AutocompleteConfig {
@@ -293,12 +312,6 @@ struct DiskHeader {
 #pragma pack(pop)
 
 
-struct HeapNode {
-	float dist;
-	uint32_t id;
-};
-
-
 class Index {
 public:
 	Index() = default;
@@ -316,17 +329,27 @@ public:
 		M0_ = (size_t)(P_.M * 2);
 		mult_ = 1 / std::log(1.0 * P_.M);
 
+		if (param.build_n_threads < 1) throw std::runtime_error("fit: n threads must be >= 1");
+
+		build_n_threads = param.build_n_threads;
+
 		if (n_ == 0 || d_ == 0) throw std::runtime_error("fit: empty dataset");
 
 		if (dist_func == "l2") {
 			scorer_ = l2_distance();
 			scorer_search_ = l2_distance();
+		} else if (dist_func == "cosine_distance") {
+			scorer_ = cosine_distance();
+			scorer_search_ = cosine_distance();
 		} else if (dist_func == "lexical") {
 			scorer_ = lexical_distance_build();
 			scorer_search_ = lexical_distance_search();
 		} else if (dist_func == "autocomplete") {
 			scorer_ = autocomplete_distance_build();
 			scorer_search_ = autocomplete_distance_search();
+		} else if (dist_func == "dot_product") {
+			scorer_ = dot_product_distance();
+			scorer_search_ = dot_product_distance();
 		} else {
 			throw std::runtime_error("invalid distance function name.");
 		}
@@ -381,12 +404,18 @@ public:
 		if (dist_func == "l2") {
 			scorer_ = l2_distance();
 			scorer_search_ = l2_distance();
+		}  else if (dist_func == "cosine_distance") {
+			scorer_ = cosine_distance();
+			scorer_search_ = cosine_distance();
 		} else if (dist_func == "lexical") {
 			scorer_ = lexical_distance_search();
 			scorer_search_ = lexical_distance_search();
 		} else if (dist_func == "autocomplete") {
 			scorer_ = autocomplete_distance_search();
 			scorer_search_ = autocomplete_distance_search();
+		}  else if (dist_func == "dot_product") {
+			scorer_ = dot_product_distance();
+			scorer_search_ = dot_product_distance();
 		} else {
 			throw std::runtime_error("invalid distance function name.");
 		}
@@ -526,10 +555,15 @@ public:
 	}
 
 	void fit() {
+		if (build_n_threads > 1) {
+		    fit_parallel(build_n_threads);
+		    return;
+		}
+
 		for (size_t i = 0; i < n_; ++i) {
 			insert(i);
 			if (i%20000 == 0) {
-				printf("%ld\n", i);
+				printf("ingested %ld points\n", i);
 			}
 		}
 
@@ -540,6 +574,68 @@ public:
 		pools_.up_deg_map.close();
 		pools_.up_nbr_map.close();
 		vec_mmap_.close();
+	}
+
+	void fit_parallel(std::size_t num_threads = 0) {
+	    if (n_ == 0) {
+	        throw std::runtime_error("fit_parallel: empty dataset");
+	    }
+
+	    init_parallel_locks();
+
+	    if (num_threads == 0) {
+	        num_threads = std::thread::hardware_concurrency();
+	    }
+
+	    if (num_threads == 0) {
+	        num_threads = 4;
+	    }
+
+	    num_threads = std::min<std::size_t>(num_threads, n_);
+
+	    insert(0);
+
+	    std::atomic<std::size_t> next_id{1};
+	    std::atomic<std::size_t> done{1};
+
+	    auto worker = [&]() {
+	        while (true) {
+	            std::size_t i = next_id.fetch_add(1, std::memory_order_relaxed);
+
+	            if (i >= n_) {
+	                break;
+	            }
+
+	            insert_parallel_safe(i);
+
+	            std::size_t current_done = done.fetch_add(1, std::memory_order_relaxed) + 1;
+
+	            if (current_done % 20000 == 0) {
+	                std::cout << current_done << "\n";
+	            }
+	        }
+	    };
+	    std::vector<std::thread> threads;
+	    threads.reserve(num_threads);
+
+	    for (std::size_t t = 0; t < num_threads; ++t) {
+	        threads.emplace_back(worker);
+	    }
+
+	    for (auto& th : threads) {
+	        th.join();
+	    }
+
+	    save_mmap_from_pools(P_.save_path, /*copy_vectors=*/true);
+
+	    vec_mmap_.flush_all();
+	    pools_.l0_deg_map.close();
+	    pools_.l0_nbr_map.close();
+	    pools_.up_deg_map.close();
+	    pools_.up_nbr_map.close();
+	    
+	    vec_mmap_.close();
+
 	}
 
 	std::vector<Pair> query(const float* q_in, int topk, int efs) {
@@ -555,7 +651,7 @@ public:
 		uint32_t ep = entry_point_;
 		float cur_dist = scorer_search_(q_in, vec0(ep), d_); // the order of feeding is really important for lexical case
 
-		for (int l = max_level_; l >= 0; --l) {
+		for (int l = max_level_; l > 0; --l) {
 			bool changed = true;
 			while (changed) {
 				changed = false;
@@ -650,19 +746,6 @@ public:
 			}
 		}
 		return ws.best_heap;
-		// std::vector<Pair> res;
-		// res.reserve(ws.best_heap.size());
-		// res.insert(res.end(), ws.best_heap.begin(), ws.best_heap.end());
-		// std::sort(res.begin(), res.end(), [](const Pair& a, const Pair& b){ return a.first < b.first; });
-		// out_idx.clear();
-		// out_idx.reserve(topk);
-
-		// for (const auto& [dist, id] : res) {
-		// 	if (!is_deleted(id)) {
-		// 		out_idx.push_back(external_id(id));
-		// 		if ((int)out_idx.size() >= topk) break;
-		// 	}
-		// }
 	}
 
 	struct QueryWorkspace {
@@ -915,13 +998,20 @@ public:
 
 private:
 
+	std::mutex entry_mutex_;
 
-	static inline uint8_t pread1(int fd, uint64_t off) {
-	  uint8_t v;
-	  if (::pread(fd, &v, 1, (off_t)off) != 1) throw std::runtime_error("pread1 failed");
-	  return v;
+	static constexpr size_t kGraphLockStripes = 65536;
+	std::unique_ptr<std::shared_mutex[]> graph_locks_;
+
+	void init_parallel_locks() {
+	    if (!graph_locks_) {
+	        graph_locks_ = std::make_unique<std::shared_mutex[]>(kGraphLockStripes);
+	    }
 	}
 
+	inline std::shared_mutex& graph_lock(uint32_t id) noexcept {
+	    return graph_locks_[id % kGraphLockStripes];
+	}
 
 	std::vector<std::string> external_ids_;
 
@@ -1092,6 +1182,250 @@ private:
 			entry_point_ = static_cast<int>(i);
 			max_level_ = clevel;
 		}
+	}
+
+	struct InsertWorkspace {
+	    std::vector<uint32_t> visited;
+	    uint32_t tag = 1;
+
+	    std::vector<uint32_t> neighbors_buf;
+
+	    std::vector<Pair> cand_heap;
+	    std::vector<Pair> best_heap;
+	    std::vector<Pair> candlist;
+	    std::vector<uint32_t> cids;
+
+	    void ensure_size(std::size_t n, std::size_t ef_construction) {
+	        if (visited.size() != n) {
+	            visited.assign(n, 0);
+	            tag = 1;
+	        }
+
+	        if (cand_heap.capacity() < ef_construction) {
+	            cand_heap.reserve(ef_construction);
+	        }
+
+	        if (best_heap.capacity() < ef_construction + 1) {
+	            best_heap.reserve(ef_construction + 1);
+	        }
+
+	        neighbors_buf.clear();
+	        cand_heap.clear();
+	        best_heap.clear();
+	        candlist.clear();
+	        cids.clear();
+	    }
+
+	    void next_tag() {
+	        ++tag;
+	        if (tag == 0) {
+	            std::fill(visited.begin(), visited.end(), 0);
+	            tag = 1;
+	        }
+	    }
+
+	    inline bool is_visited(uint32_t u) const noexcept {
+	        return visited[u] == tag;
+	    }
+
+	    inline void mark_visited(uint32_t u) noexcept {
+	        visited[u] = tag;
+	    }
+	};
+
+	inline void copy_neighbors_build_locked(
+	    uint32_t u,
+	    int l,
+	    std::vector<uint32_t>& out
+	) {
+	    std::shared_lock<std::shared_mutex> lock(graph_lock(u));
+
+	    auto [beg, end] = neighbors_build(u, l);
+	    out.assign(beg, end);
+	}
+
+	inline void push_unique_prune_locked(uint32_t u, int l, uint32_t x) {
+	    std::unique_lock<std::shared_mutex> lock(graph_lock(u));
+	    push_unique_prune(u, l, x);
+	}
+
+	void link_bidirectional_locked(
+	    uint32_t src,
+	    const std::vector<uint32_t>& dests,
+	    int level
+	) {
+	    for (uint32_t d : dests) {
+	        if (d == src) continue;
+	        if (is_deleted(d)) continue;
+
+	        push_unique_prune_locked(src, level, d);
+	        push_unique_prune_locked(d, level, src);
+	    }
+	}
+
+	void insert_parallel_safe(std::size_t i) {
+	    thread_local InsertWorkspace ws;
+	    ws.ensure_size(n_, (std::size_t)P_.ef_construction);
+
+	    const int clevel = level_[i];
+	    const float* qi = vecX((uint32_t)i);
+
+	    int local_entry;
+	    int local_max_level;
+
+	    {
+	        std::lock_guard<std::mutex> lock(entry_mutex_);
+	        local_entry = entry_point_;
+	        local_max_level = max_level_;
+	    }
+
+	    if (local_entry < 0) {
+	        throw std::runtime_error("insert_parallel_safe: entry point not initialized");
+	    }
+
+	    uint32_t ep = static_cast<uint32_t>(local_entry);
+	    float cur_dist = scorer_(qi, vecX(ep), d_);
+
+	    for (int l = local_max_level; l > clevel; --l) {
+	        bool changed = true;
+
+	        while (changed) {
+	            changed = false;
+
+	            copy_neighbors_build_locked(ep, l, ws.neighbors_buf);
+
+	            for (uint32_t nb : ws.neighbors_buf) {
+	                if (is_deleted(nb)) continue;
+
+	                float d = scorer_(qi, vecX(nb), d_);
+
+	                if (d < cur_dist) {
+	                    cur_dist = d;
+	                    ep = nb;
+	                    changed = true;
+	                }
+	            }
+	        }
+	    }
+
+	    for (int l = std::min(clevel, local_max_level); l >= 0; --l) {
+	        ws.next_tag();
+
+	        ws.cand_heap.clear();
+	        ws.best_heap.clear();
+	        ws.candlist.clear();
+	        ws.cids.clear();
+
+	        cur_dist = scorer_(qi, vecX(ep), d_);
+
+	        ws.mark_visited(ep);
+
+	        ws.cand_heap.push_back({cur_dist, ep});
+	        std::push_heap(ws.cand_heap.begin(), ws.cand_heap.end(), MinByFirst{});
+
+	        ws.best_heap.push_back({cur_dist, ep});
+	        std::push_heap(ws.best_heap.begin(), ws.best_heap.end(), MaxByFirst{});
+
+	        float worst_best = cur_dist;
+
+	        while (!ws.cand_heap.empty()) {
+	            const float best_cand_dist = ws.cand_heap.front().first;
+
+	            if (
+	                ws.best_heap.size() == (size_t)P_.ef_construction &&
+	                best_cand_dist > worst_best
+	            ) {
+	                break;
+	            }
+
+	            std::pop_heap(ws.cand_heap.begin(), ws.cand_heap.end(), MinByFirst{});
+	            const uint32_t cand = ws.cand_heap.back().second;
+	            ws.cand_heap.pop_back();
+
+	            copy_neighbors_build_locked(cand, l, ws.neighbors_buf);
+
+	            for (uint32_t nb : ws.neighbors_buf) {
+	                if (ws.is_visited(nb)) continue;
+	                if (is_deleted(nb)) continue;
+
+	                ws.mark_visited(nb);
+
+	                float d_nb = scorer_(qi, vecX(nb), d_);
+
+	                if (
+	                    ws.best_heap.size() < (size_t)P_.ef_construction ||
+	                    d_nb < worst_best
+	                ) {
+	                    ws.cand_heap.push_back({d_nb, nb});
+	                    std::push_heap(ws.cand_heap.begin(), ws.cand_heap.end(), MinByFirst{});
+
+	                    ws.best_heap.push_back({d_nb, nb});
+	                    std::push_heap(ws.best_heap.begin(), ws.best_heap.end(), MaxByFirst{});
+
+	                    if (ws.best_heap.size() > (size_t)P_.ef_construction) {
+	                        std::pop_heap(ws.best_heap.begin(), ws.best_heap.end(), MaxByFirst{});
+	                        ws.best_heap.pop_back();
+	                    }
+
+	                    worst_best = ws.best_heap.front().first;
+	                }
+	            }
+	        }
+
+	        ws.candlist.clear();
+	        ws.candlist.reserve(ws.best_heap.size());
+
+	        while (!ws.best_heap.empty()) {
+	            std::pop_heap(ws.best_heap.begin(), ws.best_heap.end(), MaxByFirst{});
+	            ws.candlist.push_back(ws.best_heap.back());
+	            ws.best_heap.pop_back();
+	        }
+
+	        std::sort(
+	            ws.candlist.begin(),
+	            ws.candlist.end(),
+	            [](const Pair& a, const Pair& b) {
+	                return a.first < b.first;
+	            }
+	        );
+
+	        if (!ws.candlist.empty()) {
+	            ep = ws.candlist.front().second;
+	        }
+
+	        const std::size_t cap = (l == 0)
+	            ? M0_
+	            : static_cast<std::size_t>(P_.M);
+
+	        ws.cids.clear();
+	        ws.cids.reserve(ws.candlist.size());
+
+	        for (const auto& p : ws.candlist) {
+	            ws.cids.push_back(p.second);
+	        }
+
+	        auto neighbors = heuristic2(
+	            static_cast<uint32_t>(i),
+	            ws.cids,
+	            cap
+	        );
+
+	        link_bidirectional_locked(
+	            static_cast<uint32_t>(i),
+	            neighbors,
+	            l
+	        );
+	    }
+
+	    // Publish as new entry point only after links exist.
+	    if (clevel > local_max_level) {
+	        std::lock_guard<std::mutex> lock(entry_mutex_);
+
+	        if (clevel > max_level_) {
+	            entry_point_ = static_cast<int>(i);
+	            max_level_ = clevel;
+	        }
+	    }
 	}
 
 	void save_mmap_from_pools(const std::string& path, bool copy_vectors) const {
@@ -1465,7 +1799,7 @@ private:
 	const uint16_t* up_deg_mmap_ = nullptr;       // [total_blocks]
 	const uint32_t* up_nbr_mmap_ = nullptr;       // [total_blocks * M]
 	uint64_t total_upper_blocks_mmap_ = 0;
-
+	uint32_t build_n_threads = 1;
 };
 
 }

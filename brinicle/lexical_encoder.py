@@ -41,7 +41,12 @@ class TextPreprocess:
 
 
 class LexicalEncoder:
-    HEADER_SIZE = 5
+    HEADER_SIZE = 6
+
+    TITLE_TF_BITS = 4
+    TITLE_TF_MASK = (1 << TITLE_TF_BITS) - 1
+    TITLE_TF_MAX = TITLE_TF_MASK
+    FLOAT32_EXACT_INT_MAX = (1 << 24) - 1
 
     special_token_names = (
         "<PAD>",
@@ -59,6 +64,7 @@ class LexicalEncoder:
     def __init__(
         self,
         max_dim: int,
+        vector_dim: int = -1,
         text_prep=None,
         tokenizer_path: Optional[str | Path] = None,
         title_ratio: float = 0.9,
@@ -74,6 +80,7 @@ class LexicalEncoder:
         else:
             self.text_prep = text_prep
         self.max_dim = max_dim
+        self.vector_dim = vector_dim
         self.title_ratio = title_ratio
 
         self.reserved_tokens = {True: self.vocab_size, False: self.vocab_size + 1}
@@ -122,7 +129,6 @@ class LexicalEncoder:
         return self.text_prep.normalize(text)
 
     def _split_isolated_chunks(self, text: str) -> List[str]:
-        # text = self._norm_text(text)
         if not text:
             return []
         return [x for x in text.split(" ") if x]
@@ -137,12 +143,8 @@ class LexicalEncoder:
         enc = self.tokenizer.encode(chunk, add_special_tokens=False)
         out = []
         for i in enc.ids:
-            i = int(i)
-            if i <= 0:
-                continue
-            if i in self.special_ids:
-                continue
-            out.append(i)
+            if i > 0 and i not in self.special_ids:
+                out.append(i)
         return out
 
     def _sorted_unique_chunk_token_ids(
@@ -150,7 +152,7 @@ class LexicalEncoder:
         text: str,
     ) -> List[int]:
         ids = set()
-        for chunk in self._split_isolated_chunks(text):
+        for chunk in text.split(" "):
             ids.update(self._token_ids_from_chunk(chunk))
         return sorted(ids)
 
@@ -158,7 +160,34 @@ class LexicalEncoder:
         self,
         title: str,
     ) -> List[int]:
-        return self._sorted_unique_chunk_token_ids(title)
+        return self._encode_title_token_ids_with_tf(title)
+
+    def _pack_title_token_tf(self, token_id: int, tf: int) -> int:
+        tf = max(1, min(int(tf), self.TITLE_TF_MAX))
+        packed = (int(token_id) << self.TITLE_TF_BITS) | tf
+
+        if packed > self.FLOAT32_EXACT_INT_MAX:
+            raise ValueError(
+                f"Packed title token id {packed} exceeds float32 exact integer range"
+            )
+
+        return packed
+
+    def _encode_title_token_ids_with_tf(
+        self,
+        text: str,
+    ) -> List[int]:
+        """Our encoder should be deterministic, that is why we split the text before tokenizing."""
+        freqs: dict[int, int] = {}
+        for chunk in text.split(" "):
+            for token_id in self._token_ids_from_chunk(chunk):
+                freqs[token_id] = freqs.get(token_id, 0) + 1
+
+        out = [
+            self._pack_title_token_tf(token_id, tf) for token_id, tf in freqs.items()
+        ][: self.title_slots]
+
+        return sorted(out)
 
     def _hash_token_ids(self, ids: List[int]) -> int:
         """Single canonical id for a (possibly multi-token) field."""
@@ -171,7 +200,7 @@ class LexicalEncoder:
     def _encode_attributes(
         self,
         attributes: Optional[List | Dict],
-    ) -> List[int]:
+    ) -> list[tuple[int, int]]:
         if not isinstance(attributes, dict) or not attributes:
             return []
         pairs = []
@@ -212,9 +241,32 @@ class LexicalEncoder:
 
     def _encode_autocomplete_query(self, text: str):
         ids = []
-        for chunk in self._split_isolated_chunks(text):
+        for chunk in text.split(" "):
             ids.extend(self._token_ids_from_chunk(chunk))
         return ids
+
+    def encode_title_only_vector(
+        self,
+        title: str,
+        normalize: bool = True,
+    ) -> np.ndarray:
+        if normalize:
+            title = self._norm_text(title)
+
+        title_ids = self._encode_title_token_ids_with_tf(title or "")
+
+        vec = np.zeros(self.max_dim, dtype=np.float32)
+        vec[0] = 0.0
+        vec[1] = float(len(title_ids))
+        vec[2] = 0.0
+        vec[3] = 0.0
+        vec[4] = 0.0
+
+        if title_ids:
+            n = len(title_ids)
+            vec[self.HEADER_SIZE : self.HEADER_SIZE + n] = title_ids
+
+        return vec
 
     def _build_vector(
         self,
@@ -222,50 +274,69 @@ class LexicalEncoder:
         attributes: Optional[Dict[str, Any] | List | str],
         category: Optional[str | int],
         subcategory: Optional[str | int],
+        vector: Optional[np.ndarray] = None,
         normalize: Optional[bool] = False,
     ) -> np.ndarray:
+        vector_available = False
+        if vector is not None:
+            if not isinstance(vector, np.ndarray):
+                raise ValueError("Invalid vector type")
+            if vector.shape[0] != self.vector_dim:
+                raise ValueError("Invalid vector shape")
+            vector_available = True
+
+        if not attributes and not category and not subcategory and not vector_available:
+            return self.encode_title_only_vector(
+                title=title,
+                normalize=bool(normalize),
+            )
+
         title = self._norm_text(title) if normalize else title
         title_ids = self._encode_title_ids(title or "")
-        kept_title_ids = title_ids[: self.title_slots]
 
         category = self._encode_label_id(category or "")
         subcategory = self._encode_label_id(subcategory or "")
 
         kept_attr_ids = []
-        available = self.max_dim - self.HEADER_SIZE - len(kept_title_ids)
+        available = self.max_dim - self.HEADER_SIZE - len(title_ids)
         if available > 1:  # at least one pair
             kept_attr_ids = self._encode_attributes(attributes)[: int(available // 2)]
 
-        vec = np.zeros(self.max_dim, dtype=np.float32)
-        vec[0] = 0
-        vec[1] = float(len(kept_title_ids))
+        vec = np.zeros(
+            self.max_dim + self.vector_dim if vector_available else self.max_dim,
+            dtype=np.float32,
+        )
+        vec[0] = 0  # later for version
+        vec[1] = float(len(title_ids))
         vec[2] = float(len(kept_attr_ids))
         vec[3] = float(category)
         vec[4] = float(subcategory)
+        vec[5] = float(self.vector_dim if vector_available else 0)
 
         pos = self.HEADER_SIZE
-        if kept_title_ids:
-            vec[pos : pos + len(kept_title_ids)] = np.asarray(
-                kept_title_ids, dtype=np.float32
-            )
-            pos += len(kept_title_ids)
+        if title_ids:
+            vec[pos : pos + len(title_ids)] = np.asarray(title_ids, dtype=np.float32)
+            pos += len(title_ids)
 
         if kept_attr_ids:
             for i, (k_hash, v_id) in enumerate(kept_attr_ids):
                 vec[pos + i * 2] = float(k_hash)
                 vec[pos + i * 2 + 1] = float(v_id)
+
+        if vector_available:
+            vec[self.max_dim :] = vector
+
         return vec
 
     def _build_autocomplete_vector(
         self,
         title: str,
-        dim: int,
         normalize: Optional[bool] = False,
     ) -> np.ndarray:
         title = self._norm_text(title) if normalize else title
         title_ids = self._encode_autocomplete_query(title or "")
         HEADER_SIZE = 1
-        available = dim - HEADER_SIZE
+        available = self.max_dim - HEADER_SIZE
         kept_title_ids = title_ids[:available]
 
         vec = np.zeros(self.max_dim, dtype=np.float32)
@@ -286,10 +357,16 @@ class LexicalEncoder:
         attributes: Optional[Dict[str, Any]] = None,
         category: Optional[str | int] = None,
         subcategory: Optional[str | int] = None,
+        vector: Optional[np.ndarray] = None,
         normalize: Optional[bool] = True,
     ) -> np.ndarray:
         return self._build_vector(
-            title, attributes, category, subcategory, normalize=normalize
+            title,
+            attributes,
+            category,
+            subcategory,
+            vector,
+            normalize=normalize,
         )
 
     def encode_query_vector(
@@ -298,10 +375,16 @@ class LexicalEncoder:
         attributes: Optional[Dict[str, Any]] = None,
         category: Optional[str | int] = None,
         subcategory: Optional[str | int] = None,
+        vector: Optional[np.ndarray] = None,
         normalize: Optional[bool] = True,
     ) -> np.ndarray:
         return self._build_vector(
-            query, attributes, category, subcategory, normalize=normalize
+            query,
+            attributes,
+            category,
+            subcategory,
+            vector,
+            normalize=normalize,
         )
 
     def encode_query_autocomplete_vector(

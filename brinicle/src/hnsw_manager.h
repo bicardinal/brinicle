@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <limits>
 #include "hnsw.h"
+#include <omp.h>
 
 namespace ghnsw_mgr {
 
@@ -313,8 +314,10 @@ public:
 		close();
 	}
 
-
-	std::vector<std::string> search(const float* q, const int k, const int efs,
+	std::vector<std::string> search(
+		const float* q,
+		const int k,
+		const int efs,
 		float threshold = std::numeric_limits<float>::infinity()
 	) {
 		if (!main_idx_ && !delta_idx_) {
@@ -323,6 +326,12 @@ public:
 
 		check_and_reload_if_needed();
 
+		return search_no_reload(q, k, efs, threshold);
+	}
+
+	std::vector<std::string> search_no_reload(const float* q, const int k, const int efs,
+		float threshold = std::numeric_limits<float>::infinity()
+	) {
 		std::vector<SearchResult> all_results;
 
 		if (main_idx_) {
@@ -357,6 +366,57 @@ public:
 
 		return out;
 	}
+
+	std::vector<std::vector<std::string>> search_batch(
+		const float* Q,
+		std::size_t nq,
+		const int k,
+		const int efs,
+		float threshold = std::numeric_limits<float>::infinity(),
+		int n_jobs = 1
+	) {
+		std::vector<std::vector<std::string>> out(nq);
+
+		if (nq == 0) {
+			return out;
+		}
+
+		if (!main_idx_ && !delta_idx_) {
+			return out;
+		}
+
+		// Important: do this once, outside the loop.
+		check_and_reload_if_needed();
+
+#ifdef _OPENMP
+		const int prev = omp_get_max_threads();
+
+		if (n_jobs > 0) {
+			omp_set_num_threads(n_jobs);
+		}
+#endif
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) if(n_jobs != 1)
+#endif
+		for (std::ptrdiff_t qi = 0; qi < static_cast<std::ptrdiff_t>(nq); ++qi) {
+			const float* q = Q + static_cast<std::size_t>(qi) * dim_;
+			out[static_cast<std::size_t>(qi)] = search_no_reload(
+				q,
+				k,
+				efs,
+				threshold
+			);
+		}
+
+#ifdef _OPENMP
+		if (n_jobs > 0) {
+			omp_set_num_threads(prev);
+		}
+#endif
+
+		return out;
+}
 
 	std::vector<std::pair<std::string, float>>
 	search_with_distance(const float* q, const int k, const int efs,
@@ -506,6 +566,7 @@ public:
 
 		writer_.finalize();
 		const std::string tmp_prefix_base = default_tmp_prefix_base_();
+
 		if (build_params.M <= 0) build_params = params_;
 
 		const size_t new_vectors = writer_.n();
@@ -996,22 +1057,29 @@ private:
 			ops::LexicalScorerConfig build_cfg;
 			build_cfg.w_title    = lexical_cfg_.build_title_weight;
 			build_cfg.w_attr     = lexical_cfg_.build_attr_weight;
-			build_cfg.w_subcategory    = lexical_cfg_.build_subcategory_weight;
 			build_cfg.w_category = lexical_cfg_.build_category_weight;
+			build_cfg.w_subcategory    = lexical_cfg_.build_subcategory_weight;
+			build_cfg.w_vector = lexical_cfg_.build_vector_weight;
+
 			build_cfg.title_alpha = lexical_cfg_.build_title_alpha;
 			build_cfg.title_beta  = lexical_cfg_.build_title_beta;
 			build_cfg.category_penalty  = lexical_cfg_.build_category_penalty;
+			build_cfg.vector_normalized  = lexical_cfg_.vector_normalized;
 			ops::set_build_lexical_config(build_cfg);
 
 			ops::LexicalScorerConfig search_cfg;
 			search_cfg.w_title    = lexical_cfg_.search_title_weight;
 			search_cfg.w_attr     = lexical_cfg_.search_attr_weight;
-			search_cfg.w_subcategory = lexical_cfg_.search_subcategory_weight;
 			search_cfg.w_category = lexical_cfg_.search_category_weight;
+			search_cfg.w_subcategory = lexical_cfg_.search_subcategory_weight;
+			build_cfg.w_vector = lexical_cfg_.search_vector_weight;
+
 			search_cfg.title_alpha = lexical_cfg_.search_title_alpha;
 			search_cfg.title_beta  = lexical_cfg_.search_title_beta;
 			search_cfg.category_penalty  = lexical_cfg_.search_category_penalty;
+			search_cfg.vector_normalized  = lexical_cfg_.vector_normalized;
 			ops::set_search_lexical_config(search_cfg);
+
 		} else if (dist_func_ == "autocomplete") {
 			ops::AutocompleteScorerConfig build_cfg;
 			build_cfg.length_penalty = autocomplete_cfg_.build_length_penalty;

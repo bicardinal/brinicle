@@ -1,7 +1,6 @@
-![Version 0.0.5](https://img.shields.io/badge/Version-0.0.5-green.svg)
+![Version 0.0.6](https://img.shields.io/badge/Version-0.0.6-green.svg)
 ![Python 3.12.x](https://img.shields.io/badge/Python-3.12.x-green.svg)
 ![Apache-2.0 License](https://img.shields.io/badge/License-Apache2.0-green.svg)
-
 
 # brinicle
 
@@ -10,14 +9,16 @@
 It supports:
 
 - raw vector similarity search
-- structured item search
-- autocomplete/query suggestion search
+- lexical, semantic, and hybrid search for structured items through one HNSW index
+- autocomplete and query suggestion search
+
+---
 
 ## Benchmark
 
 brinicle is designed for constrained environments where loading the full index into RAM is not practical.
 
-In a 256MB RAM / 1 CPU container on MNIST 60K vectors, the benchmark result was:
+In a 256MB RAM / 1 CPU container using MNIST 60K vectors:
 
 | System | Outcome |
 |---|---|
@@ -35,34 +36,11 @@ On SIFT 1M vectors, using the same in-process deployment model as FAISS and hnsw
 | hnswlib | 241.301 | 0.96364 | 0.093 | 10711.86 |
 | brinicle | 243.75 | 0.96989 | 0.103 | 9730.65 |
 
-In brinicle's benchmark suite, it reaches latency competitive with FAISS and hnswlib while keeping the index disk-backed and memory usage low.
+In this benchmark suite, brinicle stays close to FAISS and hnswlib latency while using a disk-backed index design.
 
 ![Memory usage comparison](https://brinicle.bicardinal.com/blow/memory_bars.png)
 
 See the benchmark: [brinicle benchmark](https://brinicle.bicardinal.com/benchmark)
-
----
-
-brinicle is designed for constrained environments where loading a full index into RAM is not practical. It keeps the same simple lifecycle across all engines:
-
-```python
-client.init(...)
-client.ingest(...)
-client.finalize()
-client.search(...)
-````
-
-## Features
-
-* Disk-first HNSW vector search
-* Low-RAM indexing and querying
-* Streaming-first ingest: one vector/item/suggestion at a time
-* Insert, upsert, delete, and compact rebuild
-* Raw vector search through `VectorEngine`
-* Structured item search through `ItemSearchEngine`
-* Autocomplete/query suggestion search through `AutocompleteEngine`
-* Custom scoring for lexical item search and autocomplete
-* Python bindings over a C++ core
 
 ---
 
@@ -79,33 +57,41 @@ Or build from source:
 ```bash
 git clone https://github.com/bicardinal/brinicle.git
 cd brinicle
-bash build.sh
+pip install -e .
 ```
 
 ---
 
 ## Engines
 
-brinicle exposes three engines with the same lifecycle.
-
-| Engine               | Use case                       | Input                                    |
-| -------------------- | ------------------------------ | ---------------------------------------- |
-| `VectorEngine`       | Raw ANN vector search          | `float32` vectors                        |
-| `ItemSearchEngine`   | Structured catalog/item search | title, category, subcategory, attributes |
-| `AutocompleteEngine` | Query/title suggestions        | suggestion text                          |
-
-All engines follow the same pattern:
+brinicle exposes three engines with the same lifecycle:
 
 ```python
-client.init(mode="build")
-
-for record in records:
-    client.ingest(...)
-
+client.init(...)
+client.ingest(...)
 client.finalize()
-
-results = client.search(...)
+client.search(...)
 ```
+
+| Engine | Use case | Input |
+|---|---|---|
+| `VectorEngine` | Raw ANN vector search | `float32` vectors |
+| `ItemSearchEngine` | Lexical / semantic / hybrid item search | title, category, subcategory, attributes, optional vectors |
+| `AutocompleteEngine` | Query/title suggestions | suggestion text |
+
+---
+
+## Features
+
+- Disk-first HNSW vector search
+- Low-RAM indexing and querying
+- Streaming-first ingest: one vector/item/suggestion at a time
+- Insert, upsert, delete, and compact rebuild
+- Raw vector search through `VectorEngine`
+- Structured item search through `ItemSearchEngine`
+- Lexical, semantic, and hybrid item search using one HNSW index
+- Alpha-controlled item search: lexical-only, semantic-only, or hybrid
+- Autocomplete/query suggestion search through `AutocompleteEngine`
 
 ---
 
@@ -149,6 +135,11 @@ To return distances too:
 
 ```python
 print(engine.search_with_distance(Q, k=10))
+```
+
+To do batch search:
+```python
+engine.search_batch(Qs)
 ```
 
 ---
@@ -209,25 +200,41 @@ print(engine.search(Q, k=10))
 
 ## Item search
 
-`ItemSearchEngine` searches structured catalog-like records without requiring a traditional inverted index.
+`ItemSearchEngine` searches catalog-like records with titles, metadata, and optional semantic vectors.
 
 Each item can contain:
 
-* `title`
-* `category`
-* `subcategory`
-* `attributes`
+- `title`
+- `category`
+- `subcategory`
+- `attributes`
+- an optional semantic vector
 
 Only `title` is required. The other fields are optional.
 
-Items are encoded internally into fixed-size numeric representations and searched through brinicle's HNSW graph using a structured lexical scorer.
+`ItemSearchEngine` can run in three practical modes:
+
+| Mode | How to use it |
+|---|---|
+| Lexical-only item search | Use structured fields only and set `alpha=0.0` |
+| Semantic-only item search | Provide vectors and set `alpha=1.0` |
+| Hybrid item search | Provide structured fields and vectors, then use an `alpha` between `0.0` and `1.0` |
+
+brinicle does not build separate lexical and vector indexes for item search. Structured lexical signals and optional semantic vectors are encoded into one numeric representation and searched through the same HNSW graph.
+
+---
+
+### Lexical item search
+
+Use lexical item search when you want structured catalog search without external embeddings.
 
 ```python
 import brinicle
 
 engine = brinicle.ItemSearchEngine(
     "item_index",
-    dim=96,
+    dim=96, # the larger, the more embedding space, the less truncation
+    alpha=0.0,  # lexical-only
 )
 
 engine.init(mode="build")
@@ -261,40 +268,100 @@ engine.finalize()
 print(engine.search("iphone 15 pro max", k=10))
 ```
 
+---
+
+### Hybrid item search
+
+Use hybrid item search when you want exact structured signals and semantic similarity in the same retrieval path.
+
+```python
+import numpy as np
+import brinicle
+
+VECTOR_DIM = 384
+
+engine = brinicle.ItemSearchEngine(
+    "hybrid_item_index",
+    dim=96,
+    vector_dim=VECTOR_DIM,
+    alpha=0.95,  # mostly semantic, with lexical correction
+    vector_normalized=True,
+    M=48,
+    ef_construction=1024,
+    ef_search=512,
+)
+
+engine.init(mode="build")
+
+engine.ingest(
+    external_id="p1",
+    title="Apple iPhone 15 Pro Max 256GB Natural Titanium",
+    category="Electronics",
+    subcategory="Smartphones",
+    attributes={
+        "brand": "Apple",
+        "storage": "256GB",
+        "color": "Natural Titanium",
+    },
+    vector=np.random.randn(VECTOR_DIM).astype("float32"),
+    normalize=True,
+)
+
+engine.ingest(
+    external_id="p2",
+    title="Samsung Galaxy S24 Ultra 512GB Black",
+    category="Electronics",
+    subcategory="Smartphones",
+    attributes={
+        "brand": "Samsung",
+        "storage": "512GB",
+        "color": "Black",
+    },
+    vector=np.random.randn(VECTOR_DIM).astype("float32"),
+    normalize=True,
+)
+
+engine.finalize()
+
+query_vector = np.random.randn(VECTOR_DIM).astype("float32")
+
+results = engine.search(
+    "iphone 15 pro max",
+    category="Electronics",
+    subcategory="Smartphones",
+    attributes={
+        "brand": "Apple",
+    },
+    vector=query_vector,
+    normalize=True,
+    k=10,
+)
+
+print(results)
+```
+
 To return distances:
 
 ```python
 print(engine.search_with_distance("iphone 15", k=10))
 ```
 
-Example with structured query fields:
+---
 
-```python
-results = engine.search(
-    "iphone 15",
-    category="Electronics",
-    subcategory="Smartphones",
-    attributes={
-        "brand": "Apple",
-    },
-    k=10,
-)
-```
+### Understanding `alpha`
 
-### What can Item Search be used for?
+`alpha` controls the balance between semantic vector similarity and structured lexical matching.
 
-`ItemSearchEngine` is useful for structured catalog-like data such as:
+| `alpha` | Behavior |
+|---:|---|
+| `0.0` | lexical-only |
+| `0.5` | balanced lexical + semantic |
+| `0.95` | mostly semantic, with lexical correction |
+| `1.0` | semantic-only |
 
-* products
-* movies
-* books
-* jobs
-* real estate listings
-* restaurants
-* games
-* records with titles and attributes
+For semantic-only and hybrid search, pass `vector_dim` during engine construction and provide vectors during `ingest(...)` and `search(...)`.
 
-Item Search is not a neural embedding model. It uses structured symbolic encoding and a configurable scorer.
+Choose `alpha` before building the index. In brinicle, `alpha` affects graph construction as well as search scoring; it is not only a query-time reranking parameter.
 
 ---
 
@@ -304,10 +371,10 @@ Item Search is not a neural embedding model. It uses structured symbolic encodin
 
 It can be used to index:
 
-* popular queries
-* item titles
-* category names
-* curated suggestions
+- popular queries
+- item titles
+- category names
+- curated suggestions
 
 ```python
 import brinicle
@@ -328,24 +395,13 @@ ac.finalize()
 print(ac.search("iph", k=5))
 ```
 
-`AutocompleteEngine` follows the same lifecycle as the other engines:
-
-```python
-ac.init(mode="build")
-ac.ingest(...)
-ac.finalize()
-ac.search(...)
-```
-
-The current autocomplete implementation is experimental and works best when query prefixes align well with encoded token prefixes.
+Autocomplete currently works best for prefix-aligned query and title suggestions.
 
 ---
 
 ## Streaming-first ingest
 
-brinicle does not require loading the full dataset into memory.
-
-Ingest is intentionally one record at a time:
+brinicle ingests records one at a time, so the full dataset does not need to fit in memory.
 
 ```python
 client.init(mode="build")
@@ -356,26 +412,16 @@ for item in stream_items():
 client.finalize()
 ```
 
-Users can stream data from:
-
-* JSONL files
-* databases
-* APIs
-* object storage
-* custom pipelines
-
-brinicle does not assume that your dataset fits in RAM. Rare in modern software.
-
 ---
 
 ## Configuration
 
 brinicle exposes common HNSW parameters:
 
-* `M`
-* `ef_construction`
-* `ef_search`
-* `delta_ratio`
+- `M`
+- `ef_construction`
+- `ef_search`
+- `delta_ratio`
 
 Example:
 
@@ -390,7 +436,18 @@ engine = brinicle.VectorEngine(
 )
 ```
 
-Item search also supports lexical scoring configuration.
+Item search supports alpha-controlled lexical, semantic, and hybrid scoring.
+
+```python
+engine = brinicle.ItemSearchEngine(
+    "item_index",
+    dim=96,
+    vector_dim=384,
+    alpha=0.95,
+)
+```
+
+Advanced users can pass a custom `LexicalConfig`.
 
 ```python
 cfg = brinicle.LexicalConfig()
@@ -398,6 +455,11 @@ cfg = brinicle.LexicalConfig()
 cfg.search_title_weight = 0.60
 cfg.search_category_weight = 0.15
 cfg.search_subcategory_weight = 0.15
+cfg.search_attr_weight = 0.1
+cfg.build_title_weight = 0.6
+cfg.build_category_weight = 0.15
+cfg.build_subcategory_weight = 0.15
+cfg.build_attr_weight = 0.1
 
 engine = brinicle.ItemSearchEngine(
     "item_index",
@@ -439,39 +501,21 @@ my_index.delta
 my_index.lock
 ```
 
-High-level engines such as `ItemSearchEngine` and `AutocompleteEngine` may also store metadata such as tokenizer and encoding information beside the index.
+High-level engines such as `ItemSearchEngine` and `AutocompleteEngine` may also store tokenizer and encoding metadata beside the index.
 
 ---
 
 ## Which engine should I use?
 
-Use `VectorEngine` if you already have embeddings or numeric vectors.
+Use `VectorEngine` for raw ANN search over embeddings or numeric vectors.
 
-Use `ItemSearchEngine` if you have structured catalog-like data such as products, movies, books, jobs, listings, or records with titles and attributes.
+Use `ItemSearchEngine` for catalog-like records with titles, metadata, and optional semantic vectors:
 
-Use `AutocompleteEngine` if you want low-RAM query or title suggestions.
+- `alpha=0.0` for lexical-only search
+- `alpha=1.0` for semantic-only search
+- `0.0 < alpha < 1.0` for hybrid search
 
----
-
-## Limitations
-
-* brinicle is not a full-text search engine.
-* Item Search is designed for structured catalog-like records, not long documents.
-* Item Search is symbolic/lexical, not neural semantic search.
-* Autocomplete is experimental.
-* Search quality depends on normalization, tokenizer behavior, and field structure.
-* Large updates may require graph optimization or compact rebuild.
-
----
-
-## Roadmap
-
-* High-level item search API
-* High-level autocomplete API
-* Metadata persistence for tokenizer and encoding config
-* More benchmarks for item search and autocomplete
-* Better prefix-aware autocomplete encoding
-* Improved documentation and examples
+Use `AutocompleteEngine` for low-RAM query or title suggestions.
 
 ---
 

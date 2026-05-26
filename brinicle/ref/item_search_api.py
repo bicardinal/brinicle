@@ -5,32 +5,31 @@ Use the brinicle library directly instead.
 
 import traceback
 from contextlib import asynccontextmanager
-from typing import Dict, List, Any
+from typing import Dict
 
+import numpy as np
 import orjson
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI
+from fastapi import HTTPException
+from fastapi import Request
+from fastapi import Response
 
 from brinicle import ItemSearchEngine
-
-from brinicle.ref.item_io_models import (
-    CreateItemIndexRequest,
-    LoadItemIndexRequest,
-    InitItemRequest,
-    FinalizeItemRequest,
-    IngestItemRequest,
-    IngestItemBatchRequest,
-    SearchItemRequest,
-    SearchItemResponse,
-    SearchItemResult,
-    DeleteItemRequest,
-    DeleteItemResponse,
-    SuccessResponse,
-    ListIndexesResponse,
-    ItemIndexStatusResponse,
-)
+from brinicle.ref.item_io_models import CreateItemIndexRequest
+from brinicle.ref.item_io_models import DeleteItemRequest
+from brinicle.ref.item_io_models import DeleteItemResponse
+from brinicle.ref.item_io_models import FinalizeItemRequest
+from brinicle.ref.item_io_models import InitItemRequest
+from brinicle.ref.item_io_models import ItemIndexStatusResponse
+from brinicle.ref.item_io_models import ListIndexesResponse
+from brinicle.ref.item_io_models import LoadItemIndexRequest
+from brinicle.ref.item_io_models import SuccessResponse
 
 indexes: Dict[str, ItemSearchEngine] = {}
 store_dir = "/app/data/"
+
+MAX_SEARCH_BATCH_SIZE = 8192
+MAX_INGEST_LINE_BYTES = 32 * 1024 * 1024  # 32 MB safety guard
 
 
 @asynccontextmanager
@@ -60,6 +59,29 @@ def get_engine(index_name: str) -> ItemSearchEngine:
     return indexes[index_name]
 
 
+def _ingest_item_dict(engine: ItemSearchEngine, item: dict):
+    external_id = item.get("id") or item.get("external_id")
+
+    if external_id is None:
+        raise ValueError("Item is missing id/external_id")
+
+    title = item.get("title") or ""
+
+    kwargs = {
+        "external_id": str(external_id),
+        "title": str(title),
+        "category": item.get("category") or "",
+        "subcategory": item.get("subcategory") or "",
+        "attributes": item.get("attributes"),
+    }
+
+    vector = item.get("vector")
+    if vector is not None:
+        kwargs["vector"] = np.asarray(vector, dtype=np.float32)
+
+    engine.ingest(**kwargs)
+
+
 @app.get("/", response_model=SuccessResponse)
 async def root():
     return SuccessResponse(
@@ -75,50 +97,60 @@ async def list_indexes():
 
 @app.post("/indexes", response_model=SuccessResponse)
 async def create_index(request: CreateItemIndexRequest):
-    if request.index_name in indexes:
-        return SuccessResponse(
-            success=True,
-            message=f"Item index '{request.index_name}' created successfully",
-            index_name=request.index_name,
-        )
-
-        # raise HTTPException(
-        #     status_code=409,
-        #     detail=f"Index '{request.index_name}' already exists",
-        # )
+    index_name = request.index_name
+    old_engine = indexes.get(index_name)
+    if old_engine is not None:
+        try:
+            old_engine.close()
+        except Exception as e:
+            print(f"Error closing previous item index {index_name}: {e}")
 
     try:
         params = request.params
-        path = store_dir + request.index_name
+        path = store_dir + index_name
 
         if params:
             engine = ItemSearchEngine(
                 path,
                 dim=request.dim,
+                vector_dim=request.vector_dim,
                 M=params.M,
                 ef_construction=params.ef_construction,
                 ef_search=params.ef_search,
-                seed=params.rng_seed,
+                build_n_threads=params.build_n_threads,
+                alpha=params.alpha,
+                seed=params.seed,
                 tokenizer_path=request.tokenizer_path,
+                vector_normalized=request.vector_normalized,
             )
         else:
             engine = ItemSearchEngine(
                 path,
                 dim=request.dim,
+                vector_dim=request.vector_dim,
                 tokenizer_path=request.tokenizer_path,
+                vector_normalized=request.vector_normalized,
             )
+        old_engine = indexes.get(index_name)
+        if old_engine is not None:
+            try:
+                old_engine.close()
+            except Exception as e:
+                print(f"Error closing previous item index {index_name}: {e}")
 
-        indexes[request.index_name] = engine
+        indexes[index_name] = engine
 
         return SuccessResponse(
             success=True,
-            message=f"Item index '{request.index_name}' created successfully",
-            index_name=request.index_name,
+            message=f"Item index '{index_name}' created successfully",
+            index_name=index_name,
         )
 
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=400, detail=f"Failed to create item index: {str(e)}")
+        raise HTTPException(
+            status_code=400, detail=f"Failed to create item index: {str(e)}"
+        )
 
 
 @app.delete("/indexes/{index_name}", response_model=SuccessResponse)
@@ -142,7 +174,9 @@ async def delete_index(index_name: str, destroy: bool = False):
 
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=400, detail=f"Failed to delete item index: {str(e)}")
+        raise HTTPException(
+            status_code=400, detail=f"Failed to delete item index: {str(e)}"
+        )
 
 
 @app.get("/indexes/{index_name}/status", response_model=ItemIndexStatusResponse)
@@ -171,18 +205,31 @@ async def load_index(request: LoadItemIndexRequest):
             engine = ItemSearchEngine(
                 path,
                 dim=request.dim,
+                vector_dim=request.vector_dim,
                 M=params.M,
                 ef_construction=params.ef_construction,
                 ef_search=params.ef_search,
-                seed=params.rng_seed,
+                alpha=params.alpha,
+                build_n_threads=params.build_n_threads,
+                seed=params.seed,
                 tokenizer_path=request.tokenizer_path,
+                vector_normalized=request.vector_normalized,
             )
         else:
             engine = ItemSearchEngine(
                 path,
                 dim=request.dim,
+                vector_dim=request.vector_dim,
                 tokenizer_path=request.tokenizer_path,
+                vector_normalized=request.vector_normalized,
             )
+
+        old_engine = indexes.get(index_name)
+        if old_engine is not None:
+            try:
+                old_engine.close()
+            except Exception as e:
+                print(f"Error closing previous item index {index_name}: {e}")
         indexes[index_name] = engine
 
         return SuccessResponse(
@@ -193,7 +240,9 @@ async def load_index(request: LoadItemIndexRequest):
 
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=400, detail=f"Failed to load item index: {str(e)}")
+        raise HTTPException(
+            status_code=400, detail=f"Failed to load item index: {str(e)}"
+        )
 
 
 @app.post("/init", response_model=SuccessResponse)
@@ -211,90 +260,87 @@ async def initialize_ingest(request: InitItemRequest):
 
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=400, detail=f"Failed to initialize item index: {str(e)}")
+        raise HTTPException(
+            status_code=400, detail=f"Failed to initialize item index: {str(e)}"
+        )
 
 
 @app.post("/ingest")
-async def ingest_single(request: IngestItemRequest):
-    engine = get_engine(request.index_name)
-
+async def ingest_single(request: Request):
     try:
-        item = request.item
+        payload = await request.json()
 
-        engine.ingest(
-            item.id,
-            title=item.title,
-            category=item.category or "",
-            subcategory=item.subcategory or "",
-            attributes=item.attributes,
-        )
+        index_name = payload.get("index_name")
+        if not index_name:
+            raise HTTPException(status_code=400, detail="Missing index_name")
+
+        item = payload.get("item")
+        if not item:
+            raise HTTPException(status_code=400, detail="Missing item")
+
+        engine = get_engine(index_name)
+        _ingest_item_dict(engine, item)
 
         return Response(
-            content=b'{"success":true}',
+            content=b'{"success":true,"count":1}',
             media_type="application/json",
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=400, detail=f"Failed to ingest item: {str(e)}")
 
 
+
+
 @app.post("/ingest/batch")
 async def ingest_batch(request: Request):
-    """
-    JSON batch endpoint.
 
-    Expected body:
-    {
-      "index_name": "wands_item_bench",
-      "items": [
-        {
-          "id": "1",
-          "title": "...",
-          "category": "...",
-          "subcategory": "..."
-        }
-      ]
-    }
-    """
     try:
-        body = await request.body()
-        data = orjson.loads(body)
-
-        index_name = data.get("index_name")
-        items = data.get("items")
-
+        index_name = request.query_params.get("index_name")
         if not index_name:
-            raise HTTPException(status_code=400, detail="Missing required field: index_name")
-
-        if not isinstance(items, list):
-            raise HTTPException(status_code=400, detail="Missing required list field: items")
+            raise HTTPException(
+                status_code=400,
+                detail="Missing query param: index_name",
+            )
 
         engine = get_engine(index_name)
 
+        carry = b""
         count = 0
 
-        for item in items:
-            external_id = str(item.get("id", ""))
-            title = item.get("title", "")
-            category = item.get("category", "") or ""
-            subcategory = item.get("subcategory", "") or ""
-            attributes = item.get("attributes", None)
+        async for chunk in request.stream():
+            if not chunk:
+                continue
 
-            if not external_id:
-                raise HTTPException(status_code=400, detail="Item missing required field: id")
+            carry += chunk
 
-            if not title:
-                raise HTTPException(status_code=400, detail=f"Item '{external_id}' missing required field: title")
+            if len(carry) > MAX_INGEST_LINE_BYTES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Ingest line too large. Current carry={len(carry)} bytes.",
+                )
 
-            engine.ingest(
-                external_id,
-                title=title,
-                category=category,
-                subcategory=subcategory,
-                attributes=attributes,
-            )
+            while True:
+                newline_pos = carry.find(b"\n")
+                if newline_pos < 0:
+                    break
 
+                line = carry[:newline_pos].strip()
+                carry = carry[newline_pos + 1 :]
+
+                if not line:
+                    continue
+
+                item = orjson.loads(line)
+                _ingest_item_dict(engine, item)
+                count += 1
+
+        if carry.strip():
+            item = orjson.loads(carry)
+            _ingest_item_dict(engine, item)
             count += 1
 
         return Response(
@@ -306,7 +352,10 @@ async def ingest_batch(request: Request):
         raise
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=400, detail=f"Failed to ingest item batch: {str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to batch ingest items: {str(e)}",
+        )
 
 
 @app.post("/finalize", response_model=SuccessResponse)
@@ -323,32 +372,43 @@ async def finalize_ingest(request: FinalizeItemRequest):
 
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=400, detail=f"Failed to finalize item index: {str(e)}")
+        raise HTTPException(
+            status_code=400, detail=f"Failed to finalize item index: {str(e)}"
+        )
 
 
 @app.post("/search")
-async def search_items(request: SearchItemRequest):
-    engine = get_engine(request.index_name)
-
+async def search_items(request: Request):
     try:
-        title = request.title or request.query
+        payload = await request.json()
 
-        if not title:
-            raise HTTPException(
-                status_code=400,
-                detail="Missing query text. Provide either 'query' or 'title'.",
-            )
+        index_name = payload.get("index_name")
+        if not index_name:
+            raise HTTPException(status_code=400, detail="Missing index_name")
+
+        engine = get_engine(index_name)
+
+        query = str(payload.get("query") or "").strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="Missing query")
+
+        k = int(payload.get("k", 10))
 
         kwargs = {
-            "query": title,
-            "category": request.category or "",
-            "subcategory": request.subcategory or "",
-            "attributes": request.attributes,
-            "k": request.k,
+            "query": query,
+            "category": payload.get("category") or "",
+            "subcategory": payload.get("subcategory") or "",
+            "attributes": payload.get("attributes"),
+            "k": k,
         }
 
-        if request.ef_search is not None:
-            kwargs["efs"] = request.ef_search
+        ef_search = payload.get("ef_search")
+        if ef_search is not None:
+            kwargs["efs"] = int(ef_search)
+
+        vector = payload.get("vector")
+        if vector is not None:
+            kwargs["vector"] = np.asarray(vector, dtype=np.float32)
 
         ids = engine.search(**kwargs)
         return ids
@@ -357,40 +417,127 @@ async def search_items(request: SearchItemRequest):
         raise
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=400, detail=f"Failed to search item index: {str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to search item index: {str(e)}",
+        )
 
 
-@app.post("/search_with_distance")
-async def search_items_with_distance(request: SearchItemRequest):
-    engine = get_engine(request.index_name)
-
+@app.post("/search/batch")
+async def search_items_batch(request: Request):
     try:
-        title = request.title or request.query
+        payload = await request.json()
 
-        if not title:
+        index_name = payload.get("index_name")
+        engine = get_engine(index_name)
+
+        queries = payload.get("queries") or []
+        queries = [str(q or "").strip() for q in queries]
+
+        if len(queries) > MAX_SEARCH_BATCH_SIZE:
             raise HTTPException(
                 status_code=400,
-                detail="Missing query text. Provide either 'query' or 'title'.",
+                detail=(
+                    f"Batch too large. Max allowed batch size is "
+                    f"{MAX_SEARCH_BATCH_SIZE}, got {len(queries)}."
+                ),
+            )
+
+        k = int(payload.get("k", 10))
+        n_jobs = int(payload.get("n_jobs", 1))
+        if n_jobs == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="n_jobs must be 1, greater than 1, or -1.",
+            )
+
+        ef_search = payload.get("ef_search")
+        if ef_search is not None and int(ef_search) <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="ef_search must be greater than 0.",
             )
 
         kwargs = {
-            "title": title,
-            "category": request.category or "",
-            "subcategory": request.subcategory or "",
-            "attributes": request.attributes or [],
-            "k": request.k,
+            "queries": queries,
+            "category": payload.get("category") or "",
+            "subcategory": payload.get("subcategory") or "",
+            "attributes": payload.get("attributes"),
+            "k": k,
+            "n_jobs": n_jobs,
         }
 
-        if request.ef_search is not None:
-            kwargs["ef_search"] = request.ef_search
+        if ef_search is not None:
+            kwargs["efs"] = int(ef_search)
 
-        raw_results = engine.search_with_distance(**kwargs)
-        return raw_results
+        vectors = payload.get("vectors")
+        if vectors is not None:
+            kwargs["vectors"] = np.asarray(vectors, dtype=np.float32)
+
+        ids_by_query = engine.search_batch(**kwargs)
+
+        if len(ids_by_query) != len(queries):
+            raise RuntimeError(
+                f"Batch search returned {len(ids_by_query)} result lists "
+                f"for {len(queries)} queries."
+            )
+
+        return ids_by_query
+
     except HTTPException:
         raise
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=400, detail=f"Failed to search item index: {str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to batch search item index: {str(e)}",
+        )
+
+
+@app.post("/search_with_distance")
+async def search_with_distance(request: Request):
+    try:
+        payload = await request.json()
+
+        index_name = payload.get("index_name")
+        if not index_name:
+            raise HTTPException(status_code=400, detail="Missing index_name")
+
+        engine = get_engine(index_name)
+
+        query = str(payload.get("query") or "").strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="Missing query")
+
+        k = int(payload.get("k", 10))
+
+        kwargs = {
+            "query": query,
+            "category": payload.get("category") or "",
+            "subcategory": payload.get("subcategory") or "",
+            "attributes": payload.get("attributes"),
+            "k": k,
+        }
+
+        ef_search = payload.get("ef_search")
+        if ef_search is not None:
+            kwargs["efs"] = int(ef_search)
+
+        vector = payload.get("vector")
+        if vector is not None:
+            kwargs["vector"] = np.asarray(vector, dtype=np.float32)
+
+        ids = engine.search_with_distance(**kwargs)
+        return ids
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to search item index: {str(e)}",
+        )
 
 
 @app.post("/delete", response_model=DeleteItemResponse)
@@ -431,7 +578,9 @@ async def rebuild_compact(request: FinalizeItemRequest):
                 M=params.M,
                 ef_construction=params.ef_construction,
                 ef_search=params.ef_search,
-                seed=params.rng_seed,
+                n_threads=params.n_threads,
+                batch_size=params.batch_size,
+                seed=params.seed,
             )
         else:
             engine.rebuild_compact()
@@ -446,7 +595,9 @@ async def rebuild_compact(request: FinalizeItemRequest):
         raise
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=400, detail=f"Failed to rebuild item index: {str(e)}")
+        raise HTTPException(
+            status_code=400, detail=f"Failed to rebuild item index: {str(e)}"
+        )
 
 
 if __name__ == "__main__":
