@@ -550,8 +550,7 @@ public:
 
 		for (size_t i = 0; i < dim_; ++i) {
 			float val = vec[i];
-			if (val > 1e16 || 
-				val < -1e16) {
+			if (!std::isfinite(val) || val > 1e16f || val < -1e16f) {
 				throw std::runtime_error("ingest: vector contains NaN/Inf at index " + std::to_string(i));
 			}
 		}
@@ -1072,7 +1071,7 @@ private:
 			search_cfg.w_attr     = lexical_cfg_.search_attr_weight;
 			search_cfg.w_category = lexical_cfg_.search_category_weight;
 			search_cfg.w_subcategory = lexical_cfg_.search_subcategory_weight;
-			build_cfg.w_vector = lexical_cfg_.search_vector_weight;
+			search_cfg.w_vector = lexical_cfg_.search_vector_weight;
 
 			search_cfg.title_alpha = lexical_cfg_.search_title_alpha;
 			search_cfg.title_beta  = lexical_cfg_.search_title_beta;

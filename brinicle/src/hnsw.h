@@ -82,7 +82,7 @@ inline l2func_t cosine_distance() noexcept {
 }
 
 inline l2func_t dot_product_distance() noexcept {
-	return &ops::dot_product;
+	return &ops::dot_product_distance;
 }
 
 inline l2func_t lexical_distance_build() noexcept {
@@ -106,7 +106,7 @@ using Pair = std::pair<float,uint32_t>;
 
 struct Params {
 	int M = 16;
-	int ef_construction = 128;
+	int ef_construction = 200;
 	int ef_search = 64;
 	uint64_t rng_seed = 124;
 	int k_base = 2;
@@ -347,7 +347,7 @@ public:
 		} else if (dist_func == "autocomplete") {
 			scorer_ = autocomplete_distance_build();
 			scorer_search_ = autocomplete_distance_search();
-		} else if (dist_func == "dot_product") {
+		} else if (dist_func == "dot_product_distance") {
 			scorer_ = dot_product_distance();
 			scorer_search_ = dot_product_distance();
 		} else {
@@ -413,7 +413,7 @@ public:
 		} else if (dist_func == "autocomplete") {
 			scorer_ = autocomplete_distance_search();
 			scorer_search_ = autocomplete_distance_search();
-		}  else if (dist_func == "dot_product") {
+		}  else if (dist_func == "dot_product_distance") {
 			scorer_ = dot_product_distance();
 			scorer_search_ = dot_product_distance();
 		} else {

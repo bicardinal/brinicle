@@ -450,6 +450,14 @@ inline float cosine_similarity(const float* a, const float* b, std::size_t dim) 
 	return dot_product / norm_product;
 }
 
+inline float dot_product_distance(
+    const float* a,
+    const float* b,
+    std::size_t dim
+) noexcept {
+    return -dot_product(a, b, dim);
+}
+
 inline float clamp_unit(float x) noexcept {
 	if (x > 1.0f) return 1.0f;
 	if (x < -1.0f) return -1.0f;
