@@ -645,10 +645,6 @@ inline std::size_t clamp_count(std::size_t wanted, std::size_t available) noexce
 }
 
 
-
-
-
-
 inline std::uint32_t packed_tf(std::uint32_t packed) noexcept {
 	const std::uint32_t tf = packed & kTitleTfMask;
 	return tf == 0u ? 1u : tf;

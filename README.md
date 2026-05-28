@@ -1,5 +1,5 @@
 
-![Version 0.0.7](https://img.shields.io/badge/Version-0.0.7-green.svg)
+![Version 0.0.8](https://img.shields.io/badge/Version-0.0.8-green.svg)
 ![Python 3.12.x](https://img.shields.io/badge/Python-3.12.x-green.svg)
 ![Apache-2.0 License](https://img.shields.io/badge/License-Apache2.0-green.svg)
 
