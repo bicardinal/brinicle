@@ -38,16 +38,14 @@ class AutocompleteEngine:
         M: int = 16,
         ef_construction: int = 200,
         ef_search: int = 64,
-        n_threads: int = 1,  # for build
-        batch_size: int = 1,  # for build
+        build_n_threads: int = 1,
         seed: int = 0,
         autocomplete_config: AutocompleteConfig | None = None,
     ) -> None:
         if dim <= 1:
             raise ValueError("dim must be greater than 1")
 
-        self.n_threads = n_threads
-        self.batch_size = batch_size
+        self.build_n_threads = int(build_n_threads)
 
         self.index_path = str(index_path)
         self._dim = int(dim)
@@ -72,8 +70,7 @@ class AutocompleteEngine:
             M,
             ef_construction,
             ef_search,
-            n_threads=n_threads,
-            batch_size=batch_size,
+            build_n_threads=build_n_threads,
             seed=seed,
             dist_func="autocomplete",
             autocomplete_config=self.autocomplete_config,
@@ -98,7 +95,6 @@ class AutocompleteEngine:
 
         vec = self.encoder.encode_build_autocomplete_vector(
             text,
-            self._dim,
             normalize=normalize,
         )
 
@@ -110,8 +106,7 @@ class AutocompleteEngine:
         M: int = 0,
         ef_construction: int = 0,
         ef_search: int = 0,
-        n_jobs: int = 0,
-        batch_size: int = 0,
+        build_n_threads: int = 0,
         seed: int = 0,
     ) -> None:
         self._engine.finalize(
@@ -119,8 +114,7 @@ class AutocompleteEngine:
             M=M,
             ef_construction=ef_construction,
             ef_search=ef_search,
-            n_jobs=n_jobs,
-            batch_size=batch_size,
+            build_n_threads=build_n_threads,
             seed=seed,
         )
 
@@ -135,7 +129,6 @@ class AutocompleteEngine:
     ) -> list[str]:
         qvec = self.encoder.encode_query_autocomplete_vector(
             query,
-            self._dim,
             normalize=normalize,
         )
 
@@ -157,7 +150,6 @@ class AutocompleteEngine:
     ) -> list[tuple[str, float]]:
         qvec = self.encoder.encode_query_autocomplete_vector(
             query,
-            self._dim,
             normalize=normalize,
         )
 
@@ -168,13 +160,53 @@ class AutocompleteEngine:
             threshold=threshold,
         )
 
+    def search_batch(
+        self,
+        queries: list[str],
+        k: int = 10,
+        efs: int | None = None,
+        threshold: float = math.inf,
+        *,
+        normalize: bool = True,
+        n_jobs: int = 1,
+    ) -> list[list[str]]:
+        """
+        Batch autocomplete search for multiple independent queries.
+        This method is experimental, and mostly for benchmarking.
+
+        n_jobs:
+            1  -> serial batch inside C++
+            >1 -> parallel batch inside C++
+            -1 -> OpenMP default, if enabled
+        """
+
+        if not queries:
+            return []
+
+        qmat = np.empty((len(queries), self._dim), dtype=np.float32)
+
+        for i, query in enumerate(queries):
+            qvec = self.encoder.encode_query_autocomplete_vector(
+                str(query or ""),
+                normalize=normalize,
+            )
+            qmat[i] = self._as_f32(qvec)
+
+        return self._engine.search_batch(
+            qmat,
+            k=k,
+            efs=self._resolve_efs(efs),
+            threshold=threshold,
+            n_jobs=n_jobs,
+        )
+
     def delete_items(
         self,
         external_ids: list[str],
         return_not_found: bool = False,
     ):
         return self._engine.delete_items(
-            external_ids,
+            [str(x) for x in external_ids],
             return_not_found=return_not_found,
         )
 
@@ -183,12 +215,14 @@ class AutocompleteEngine:
         M: int = 16,
         ef_construction: int = 200,
         ef_search: int = 64,
+        build_n_threads: int = 1,
         seed: int = 0,
     ) -> None:
         self._engine.rebuild_compact(
             M=M,
             ef_construction=ef_construction,
             ef_search=ef_search,
+            build_n_threads=build_n_threads,
             seed=seed,
         )
 

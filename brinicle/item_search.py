@@ -7,6 +7,7 @@ from typing import Mapping
 from typing import Optional
 from typing import Union
 from typing import Tuple
+from typing import Sequence
 
 import numpy as np
 
@@ -205,43 +206,152 @@ class ItemSearchEngine:
 
     def search_batch(
         self,
-        queries: list[str],
+        queries: Sequence[str],
         k: int = 10,
         efs: int | None = None,
         threshold: float = math.inf,
-        category: Label = None,
-        subcategory: Label = None,
-        attributes: Attributes = None,
-        vectors: np.ndarray = None,
+        categories: Sequence[Label] | None = None,
+        subcategories: Sequence[Label] | None = None,
+        attributes_list: Sequence[Attributes] | None = None,
+        vectors: np.ndarray | Sequence[np.ndarray] | None = None,
         *,
         normalize: bool = False,
         n_jobs: int = 1,
     ) -> list[list[str]]:
         """
-        Batch search for multiple independent queries.
-        This method is experimental, and mostly for benchmarking.
+        Batch search for multiple independent item queries.
 
-        n_jobs:
-            1  -> serial batch inside C++
-            >1 -> parallel batch inside C++
-            -1 -> OpenMP default, if enabled
+        Fast paths:
+            1. queries only
+            2. queries + vectors only
+
+        General path:
+            queries + optional per-query category/subcategory/attributes/vector metadata.
+
+        If categories, subcategories, attributes_list, or vectors are provided,
+        their length must match len(queries).
         """
 
-        if not queries:
+        n = len(queries)
+
+        if n == 0:
             return []
 
-        qmat = np.empty((len(queries), self._dim + self.vector_dim), dtype=np.float32)
+        total_dim = self._dim + self.vector_dim
+
+        has_metadata = (
+            categories is not None
+            or subcategories is not None
+            or attributes_list is not None
+        )
+
+        # Fast path 1: queries only
+
+        if not has_metadata and vectors is None:
+            qmat = np.empty((n, total_dim), dtype=np.float32)
+
+            for i, query in enumerate(queries):
+                qmat[i] = self._encode_query(
+                    query=str(query or ""),
+                    attributes=None,
+                    category=None,
+                    subcategory=None,
+                    vector=None,
+                    normalize=normalize,
+                )
+
+            return self._engine.search_batch(
+                qmat,
+                k=k,
+                efs=self._resolve_efs(efs),
+                threshold=threshold,
+                n_jobs=n_jobs,
+            )
+
+        vectors_arr = None
+
+        if vectors is not None:
+            if self.vector_dim <= 0:
+                raise ValueError(
+                    "vectors were provided, but this engine was created with vector_dim=0"
+                )
+
+            vectors_arr = np.asarray(vectors, dtype=np.float32)
+
+            if vectors_arr.ndim != 2:
+                raise ValueError(
+                    "vectors must be a 2-D array with shape (len(queries), vector_dim)"
+                )
+
+            if vectors_arr.shape[0] != n:
+                raise ValueError(
+                    f"vectors length mismatch: expected {n}, got {vectors_arr.shape[0]}"
+                )
+
+            if vectors_arr.shape[1] != self.vector_dim:
+                raise ValueError(
+                    f"vectors dimension mismatch: expected {self.vector_dim}, "
+                    f"got {vectors_arr.shape[1]}"
+                )
+
+            vectors_arr = np.ascontiguousarray(vectors_arr, dtype=np.float32)
+
+        # Fast path 2: queries + vectors only
+
+        if not has_metadata and vectors_arr is not None:
+            qmat = np.empty((n, total_dim), dtype=np.float32)
+
+            for i, query in enumerate(queries):
+                qmat[i] = self._encode_query(
+                    query=str(query or ""),
+                    attributes=None,
+                    category=None,
+                    subcategory=None,
+                    vector=vectors_arr[i],
+                    normalize=normalize,
+                )
+
+            return self._engine.search_batch(
+                qmat,
+                k=k,
+                efs=self._resolve_efs(efs),
+                threshold=threshold,
+                n_jobs=n_jobs,
+            )
+
+        # General path: independent per-query metadata.
+        if categories is not None and len(categories) != n:
+            raise ValueError(
+                f"categories length mismatch: expected {n}, got {len(categories)}"
+            )
+
+        if subcategories is not None and len(subcategories) != n:
+            raise ValueError(
+                f"subcategories length mismatch: expected {n}, got {len(subcategories)}"
+            )
+
+        if attributes_list is not None:
+            if isinstance(attributes_list, Mapping):
+                raise TypeError(
+                    "attributes_list must be a sequence of mappings, not a single mapping"
+                )
+
+            if len(attributes_list) != n:
+                raise ValueError(
+                    f"attributes_list length mismatch: expected {n}, got {len(attributes_list)}"
+                )
+
+        qmat = np.empty((n, total_dim), dtype=np.float32)
 
         for i, query in enumerate(queries):
-            qvec = self._encode_query(
+            qmat[i] = self._encode_query(
                 query=str(query or ""),
-                attributes=attributes,
-                category=category,
-                subcategory=subcategory,
-                vector=vectors[i],
+                attributes=None if attributes_list is None else attributes_list[i],
+                category=None if categories is None else categories[i],
+                subcategory=None if subcategories is None else subcategories[i],
+                vector=None if vectors_arr is None else vectors_arr[i],
                 normalize=normalize,
             )
-            qmat[i] = qvec
 
         return self._engine.search_batch(
             qmat,
@@ -287,7 +397,7 @@ class ItemSearchEngine:
         return_not_found: bool = False,
     ):
         return self._engine.delete_items(
-            external_ids, return_not_found=return_not_found
+            [str(x) for x in external_ids], return_not_found=return_not_found
         )
 
     def rebuild_compact(
@@ -295,12 +405,14 @@ class ItemSearchEngine:
         M: int = 16,
         ef_construction: int = 200,
         ef_search: int = 64,
+        build_n_threads: int = 1,
         seed: int = 0,
     ) -> None:
         self._engine.rebuild_compact(
             M=M,
             ef_construction=ef_construction,
             ef_search=ef_search,
+            build_n_threads=build_n_threads,
             seed=seed,
         )
 

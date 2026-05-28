@@ -390,18 +390,16 @@ class LexicalEncoder:
     def encode_query_autocomplete_vector(
         self,
         query: str,
-        dim: int,
         normalize: Optional[bool] = True,
     ) -> np.ndarray:
-        return self._build_autocomplete_vector(query, dim, normalize=normalize)
+        return self._build_autocomplete_vector(query, normalize=normalize)
 
     def encode_build_autocomplete_vector(
         self,
         query: str,
-        dim: int,
         normalize: Optional[bool] = True,
     ) -> np.ndarray:
-        return self._build_autocomplete_vector(query, dim, normalize=normalize)
+        return self._build_autocomplete_vector(query, normalize=normalize)
 
 
 if __name__ == "__main__":
