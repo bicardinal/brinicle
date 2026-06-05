@@ -639,9 +639,6 @@ public:
 	}
 
 	std::vector<Pair> query(const float* q_in, int topk, int efs) {
-		// if (!l0_.ready) {
-		// 	throw std::runtime_error("query: L0 fused layout not initialized");
-		// }
 		thread_local QueryWorkspace ws;
 		topk = (topk > 0 ? (uint32_t)topk : 0);
 		const uint32_t ef = std::max<uint32_t>(efs, topk);

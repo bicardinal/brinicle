@@ -12,6 +12,7 @@ It supports:
 * single-query search
 * batch search
 * search with distances
+* local sharding for large indexes
 * insert, upsert, and delete
 * compact rebuild and graph optimization
 
@@ -38,6 +39,7 @@ engine = brinicle.ItemSearchEngine(
     alpha=0.95,
     seed=0,
     lexical_config=None,
+    n_shards=1
 )
 ```
 
@@ -60,6 +62,8 @@ engine = brinicle.ItemSearchEngine(
 | `alpha`             | Balance between lexical and semantic scoring                |
 | `seed`              | Random seed for graph construction                          |
 | `lexical_config`    | Optional custom lexical scoring configuration               |
+| `n_shards`          | Number of local shards used when building the index         |
+
 
 Example:
 
@@ -74,6 +78,43 @@ engine = brinicle.ItemSearchEngine(
     ef_search=512,
 )
 ```
+
+---
+
+## Local Sharding
+
+`n_shards` controls how many local shards brinicle creates for the index during build.
+
+The current sharding implementation is local sharding. It is not distributed sharding across multiple machines.
+
+During insertion, brinicle uses hash-based routing to decide which shard receives each item. During search, brinicle searches all shards, then merges the partial results into a final ranked result list.
+
+For multi-shard indexes, search methods accept `n_jobs`, which controls how many shards are searched in parallel.
+
+Higher `n_jobs` can improve search speed, but it also increases CPU and I/O usage.
+
+Example:
+
+```python
+engine = brinicle.ItemSearchEngine(
+    "large_item_index",
+    dim=96,
+    vector_dim=384,
+    alpha=1.0,
+    n_shards=50,
+)
+
+results = engine.search(
+    "",
+    vector=query_vector,
+    k=10,
+    n_jobs=8,
+)
+```
+
+As a practical starting point, keep `n_shards=1` for smaller indexes. Sharding becomes more useful when the index contains more than about 2 million elements (that's a rule of thumb, of course). For example, for an index with around 100 million elements, `n_shards=50` can be a reasonable starting point.
+
+Benchmark `n_shards` and `n_jobs` with your real data and hardware, because the best values depend on item count, vector dimension, storage speed, and available CPU cores.
 
 ---
 
@@ -95,7 +136,7 @@ engine.ingest(
 )
 ```
 
-Only `title` is required.
+Only `title` is required. For pure vector-only indexes, this can be an empty string.
 
 `category`, `subcategory`, `attributes`, and `vector` are optional.
 
@@ -117,13 +158,13 @@ engine.ingest(
 
 ## Search Modes
 
-`ItemSearchEngine` can be used in three main modes.
+`ItemSearchEngine` can be used in three common modes.
 
-| Mode            | Setup                                                               |
-| --------------- | ------------------------------------------------------------------- |
-| Lexical search  | Use structured fields and set `alpha=0.0`                           |
-| Semantic search | Provide vectors and set `alpha=1.0`                                 |
-| Hybrid search   | Provide structured fields and vectors, then use `0.0 < alpha < 1.0` |
+| Mode                                  | Setup                                                               |
+| ------------------------------------- | ------------------------------------------------------------------- |
+| Lexical search                        | Use structured fields and set `alpha=0.0`                           |
+| Semantic search                       | Provide vectors and set `alpha=1.0`                                 |
+| Hybrid search                         | Provide structured fields and vectors, then use `0.0 < alpha < 1.0` |
 
 ---
 
@@ -141,6 +182,9 @@ engine.ingest(
 `alpha` affects both graph construction and search scoring, so choose it before building the index.
 
 When `lexical_config` is provided, the custom config controls the weights directly.
+
+ - If you only need vector search, with no title query and no parameter filtering, use `alpha=1.0` and pass an empty string as the query. This allows brinicle to use the Vector Fast Path during search, which can significantly improve search speed.
+ - If you only need lexical search, with no vector and no parameter filtering, use `alpha=0.0`. This allows brinicle to use the Lexical Fast Path during search, which can significantly improve search speed.
 
 ---
 
@@ -297,8 +341,11 @@ engine = brinicle.ItemSearchEngine(
     vector_normalized=True,
 )
 ```
+Which can be faster.
 
 For semantic and hybrid item search, query vectors must have the same dimension as `vector_dim`.
+
+For pure vector search, pass an empty string as the item title during ingest and an empty string as the query during search. If there are no parameter filters, keep `alpha=1.0` so the engine can use the Vector Fast Path.
 
 ---
 
@@ -354,7 +401,7 @@ vector_dim = 384
 
 engine = brinicle.ItemSearchEngine(
     "semantic_item_index",
-    dim=96,
+    dim=6,
     vector_dim=vector_dim,
     alpha=1.0,
 )
@@ -365,7 +412,7 @@ item_vector = np.random.randn(vector_dim).astype("float32")
 
 engine.ingest(
     external_id="p1",
-    title="Apple iPhone 15 Pro Max 256GB",
+    title="",
     vector=item_vector,
     normalize=True,
 )
@@ -375,7 +422,7 @@ engine.finalize()
 query_vector = np.random.randn(vector_dim).astype("float32")
 
 results = engine.search(
-    "iphone 15 pro",
+    "",
     vector=query_vector,
     normalize=True,
     k=10,
@@ -383,6 +430,80 @@ results = engine.search(
 
 print(results)
 ```
+`dim` is mainly used by lexical search and parameter filtering, if there is no parameter filtering, and no title, one can save memory by setting dim to 6, which is the minimum.
+In this example, the empty search query tells brinicle not to use a title query. Because `alpha=1.0` and no category, subcategory, or attributes are provided, brinicle can use the Vector Fast Path.
+
+---
+
+## Vector Search with Parameter Filtering
+
+Use this setup when retrieval should be vector-based, but category, subcategory, or attributes should still be used as filters.
+
+In this mode, do not use the title as a lexical signal. Pass an empty string as the item title and query, then use a custom `LexicalConfig` that disables title weights at build time and search time.
+
+```python
+import numpy as np
+import brinicle
+
+vector_dim = 384
+
+cfg = brinicle.LexicalConfig()
+cfg.build_title_weight = 0.0
+cfg.search_title_weight = 0.0
+
+cfg.build_vector_weight = 1.0
+cfg.search_vector_weight = 1.0
+
+cfg.search_attr_weight = 0.2
+cfg.search_category_weight = 0.3
+cfg.search_subcategory_weight = 0.5
+
+cfg.build_attr_weight = 0.2
+cfg.build_category_weight = 0.3
+cfg.build_subcategory_weight = 0.5
+
+engine = brinicle.ItemSearchEngine(
+    "vector_filter_item_index",
+    dim=96,
+    vector_dim=vector_dim,
+    lexical_config=cfg,
+)
+
+engine.init(mode="build")
+
+item_vector = np.random.randn(vector_dim).astype("float32")
+
+engine.ingest(
+    external_id="p1",
+    title="",
+    category="Electronics",
+    subcategory="Smartphones",
+    attributes={"brand": "Apple", "storage": "256GB"},
+    vector=item_vector,
+    normalize=True,
+)
+
+engine.finalize()
+
+query_vector = np.random.randn(vector_dim).astype("float32")
+
+results = engine.search(
+    "",
+    category="Electronics",
+    subcategory="Smartphones",
+    attributes={"brand": "Apple"},
+    vector=query_vector,
+    normalize=True,
+    threshold=1.0,
+    k=10,
+)
+
+print(results)
+```
+
+`threshold` controls how strict the filter behavior is. Tune the parameter weights, penalties, and threshold based on how hard the filters should be. `threshold=3.0` means complete hard-filtering.
+Please note that for consistency, set weights of build, and search in such a way that they sums up to one. For instance, in this example 0.2 + 0.3 + 0.5 = 1.0 and the same thing for build.
+In the background we have 1.0 score for semantic and 1.0 for lexical if weights sums up to 1.0. So, the worst match should have maximum distance 2.0.
 
 ---
 
@@ -448,6 +569,7 @@ results = engine.search(
     attributes=None,
     vector=None,
     normalize=False,
+    n_jobs=1,
 )
 ```
 
@@ -464,18 +586,22 @@ results = engine.search(
 | `attributes`  | Optional query attributes             |
 | `vector`      | Optional query vector                 |
 | `normalize`   | Whether to normalize the query vector |
+| `n_jobs`      | Number of shards to search in parallel on multi-shard indexes |
 
 `search(...)` returns external IDs:
 
 ```python
 ["p1", "p7", "p3"]
 ```
+`n_jobs` controls how many shards are searched in parallel. Higher values can reduce latency, but they also consume more CPU and I/O. For n_shards=1 setup, one can ignore this parameter.
 
 ---
 
 ## Search with Distance
 
 Use `search_with_distance(...)` to return IDs and distances.
+
+On multi-shard indexes, `n_jobs` controls how many shards are searched in parallel.
 
 ```python
 results = engine.search_with_distance(
@@ -510,6 +636,8 @@ results = engine.search_batch(
 ```
 
 If `categories`, `subcategories`, `attributes_list`, or `vectors` are provided, their length must match `len(queries)`.
+
+
 
 Example:
 
@@ -776,6 +904,7 @@ engine.search(
     attributes=None,
     vector=None,
     normalize=False,
+    n_jobs=1,
 )
 ```
 
@@ -796,6 +925,7 @@ engine.search_with_distance(
     attributes=None,
     vector=None,
     normalize=False,
+    n_jobs=1,
 )
 ```
 

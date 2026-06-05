@@ -1,8 +1,6 @@
-Here is the clean draft for the **Autocomplete Engine** section.
-
 # Autocomplete Engine
 
-`AutocompleteEngine` is Brinicle’s high-level engine for autocomplete and suggestion search.
+`AutocompleteEngine` is brinicle's high-level engine for autocomplete and suggestion search.
 
 Use it for:
 
@@ -12,7 +10,7 @@ Use it for:
 * category suggestions
 * curated search phrases
 
-`AutocompleteEngine` uses the same disk-first HNSW infrastructure as the other Brinicle engines, but it encodes suggestion text internally before indexing and searching.
+`AutocompleteEngine` uses the same disk-first HNSW infrastructure as the other brinicle engines, but it encodes suggestion text internally before indexing and searching.
 
 It supports:
 
@@ -23,6 +21,7 @@ It supports:
 * single-query search
 * batch search
 * search with distances
+* local sharding for large indexes
 * compact rebuild
 * graph optimization
 
@@ -43,6 +42,7 @@ ac = brinicle.AutocompleteEngine(
     build_n_threads=1,
     seed=0,
     autocomplete_config=None,
+    n_shards=1,
 )
 ```
 
@@ -61,6 +61,7 @@ ac = brinicle.AutocompleteEngine(
 | `build_n_threads`     | Number of build threads                             |
 | `seed`                | Random seed for graph construction                  |
 | `autocomplete_config` | Optional autocomplete scoring configuration         |
+| `n_shards`            | Number of local shards used when building the index |
 
 Example:
 
@@ -73,6 +74,40 @@ ac = brinicle.AutocompleteEngine(
     ef_search=128,
 )
 ```
+
+---
+
+## Local Sharding
+
+`n_shards` controls how many local shards brinicle creates for the autocomplete index during build.
+
+The current sharding implementation is local sharding. It is not distributed sharding across multiple machines.
+
+During insertion, brinicle uses hash-based routing to decide which shard receives each suggestion. During search, brinicle searches all shards, then merges the partial results into a final ranked suggestion list.
+
+For multi-shard indexes, search methods accept `n_jobs`, which controls how many shards are searched in parallel.
+
+Higher `n_jobs` can improve search speed, but it also increases CPU and I/O usage.
+
+Example:
+
+```python
+ac = brinicle.AutocompleteEngine(
+    "large_autocomplete_index",
+    dim=48,
+    n_shards=50,
+)
+
+results = ac.search(
+    "iphone",
+    k=5,
+    n_jobs=8,
+)
+```
+
+As a practical starting point, keep `n_shards=1` for smaller autocomplete indexes. Sharding becomes more useful when the index contains more than about 2 million suggestions. For example, for an index with around 100 million suggestions, `n_shards=50` can be a reasonable starting point.
+
+Benchmark `n_shards` and `n_jobs` with your real data and hardware, because the best values depend on suggestion count, encoded dimension, storage speed, and available CPU cores.
 
 ---
 
@@ -106,7 +141,7 @@ ac.ingest(
 
 Autocomplete search is prefix-oriented.
 
-Brinicle compares query tokens with suggestion tokens from the beginning of the text. Earlier token matches matter more than later token matches.
+brinicle compares query tokens with suggestion tokens from the beginning of the text. Earlier token matches matter more than later token matches.
 
 Example:
 
@@ -253,24 +288,30 @@ ac.search(
     efs=None,
     threshold=float("inf"),
     normalize=True,
+    n_jobs=1,
 )
 ```
 
-| Parameter   | Meaning                                   |
-| ----------- | ----------------------------------------- |
-| `query`     | Text query                                |
-| `k`         | Maximum number of suggestions             |
-| `efs`       | Query-time search width                   |
-| `threshold` | Maximum accepted distance                 |
-| `normalize` | Whether to normalize encoded query values |
+| Parameter   | Meaning                                                        |
+| ----------- | -------------------------------------------------------------- |
+| `query`     | Text query                                                     |
+| `k`         | Maximum number of suggestions                                  |
+| `efs`       | Query-time search width                                        |
+| `threshold` | Maximum accepted distance                                      |
+| `normalize` | Whether to normalize encoded query values                      |
+| `n_jobs`    | Number of shards to search in parallel on multi-shard indexes  |
 
 Increasing `efs` usually improves recall, but increases query latency.
+
+`n_jobs` controls how many shards are searched in parallel. Higher values can reduce latency on multi-shard indexes, but they also consume more CPU and I/O. For `n_shards=1`, you can ignore this parameter.
 
 ---
 
 ## Search with Distance
 
 Use `search_with_distance(...)` to return suggestion IDs and distances.
+
+On multi-shard indexes, `n_jobs` controls how many shards are searched in parallel.
 
 ```python
 results = ac.search_with_distance(
@@ -317,7 +358,7 @@ The return value contains one suggestion list per query:
 ]
 ```
 
-`n_jobs` controls parallel query execution when parallel execution is available.
+For single-shard indexes, `n_jobs` controls parallel query execution when parallel execution is available. For multi-shard indexes, it is also used by sharded search execution, so higher values can reduce latency but increase CPU and I/O usage.
 
 ---
 
@@ -350,7 +391,7 @@ ac.ingest("iphone 15 pro max", "iphone 15 pro max 256gb")
 ac.finalize()
 ```
 
-If the external ID already exists, Brinicle marks the old record as deleted and inserts the new version.
+If the external ID already exists, brinicle marks the old record as deleted and inserts the new version.
 
 If the external ID does not exist, the suggestion is inserted as a new record.
 
@@ -396,7 +437,7 @@ Rebuilds the index from alive records, removes deleted records physically, and c
 ac.optimize_graph()
 ```
 
-Runs conditional maintenance. If the index crosses the configured maintenance threshold, Brinicle rebuilds the graph.
+Runs conditional maintenance. If the index crosses the configured maintenance threshold, brinicle rebuilds the graph.
 
 ---
 
@@ -478,6 +519,7 @@ ac.search(
     efs=None,
     threshold=float("inf"),
     normalize=True,
+    n_jobs=1,
 )
 ```
 
@@ -494,6 +536,7 @@ ac.search_with_distance(
     efs=None,
     threshold=float("inf"),
     normalize=True,
+    n_jobs=1,
 )
 ```
 

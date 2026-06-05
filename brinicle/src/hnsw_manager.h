@@ -264,7 +264,7 @@ struct SearchResult {
 class VectorEngine {
 public:
 	enum class PendingMode { None, Build, Insert, Upsert };
-
+	friend class ShardedVectorEngine;
 	VectorEngine(
 		std::string index_path,
 		std::size_t dim = 0,

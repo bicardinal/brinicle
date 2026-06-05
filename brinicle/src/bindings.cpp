@@ -2,7 +2,7 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 #include <limits>
-#include "hnsw_manager.h"
+#include "sharded_hnsw_manager.h"
 #include "knn.h"
 
 
@@ -158,7 +158,7 @@ PYBIND11_MODULE(_brinicle, m) {
 		.def_readwrite("search_length_penalty", &ghnsw::AutocompleteConfig::search_length_penalty);
 
 
-	py::class_<ghnsw_mgr::VectorEngine>(m, "VectorEngine")
+	py::class_<ghnsw_mgr::ShardedVectorEngine>(m, "VectorEngine")
 		.def(py::init([](const std::string& index_path,
 						 std::size_t dim,
 						 const float delta_ratio,
@@ -169,7 +169,8 @@ PYBIND11_MODULE(_brinicle, m) {
 						 std::size_t seed,
 						 const std::string& dist_func,
 						 const ghnsw::LexicalConfig& lexical_config,
-						 const ghnsw::AutocompleteConfig& autocomplete_config) {
+						 const ghnsw::AutocompleteConfig& autocomplete_config,
+						 std::size_t n_shards) {
 			ghnsw::Params params;
 			params.M = M;
 			params.ef_construction = ef_construction;
@@ -177,8 +178,8 @@ PYBIND11_MODULE(_brinicle, m) {
 			params.build_n_threads = build_n_threads;
 			params.rng_seed = seed;
 			py::gil_scoped_release rel;
-			return std::make_unique<ghnsw_mgr::VectorEngine>(
-				index_path, dim, delta_ratio, params, dist_func, lexical_config, autocomplete_config
+			return std::make_unique<ghnsw_mgr::ShardedVectorEngine>(
+				index_path, n_shards, dim, delta_ratio, params, dist_func, lexical_config, autocomplete_config
 			);
 		}),
 		py::arg("index_path"),
@@ -191,11 +192,12 @@ PYBIND11_MODULE(_brinicle, m) {
 		py::arg("seed") = 0,
 		py::arg("dist_func") = "l2",
 		py::arg("lexical_config") = ghnsw::LexicalConfig(),
-		py::arg("autocomplete_config") = ghnsw::AutocompleteConfig()
+		py::arg("autocomplete_config") = ghnsw::AutocompleteConfig(),
+		py::arg("n_shards") = 1
 		)
 
 
-		.def("init", [](ghnsw_mgr::VectorEngine& self,
+		.def("init", [](ghnsw_mgr::ShardedVectorEngine& self,
 						const std::string& mode) {
 			py::gil_scoped_release rel;
 			self.init(mode);
@@ -204,7 +206,7 @@ PYBIND11_MODULE(_brinicle, m) {
 		"Start incremental ingest. mode in ['build', 'insert', 'upsert']")
 
 
-		.def("ingest", [](ghnsw_mgr::VectorEngine& self,
+		.def("ingest", [](ghnsw_mgr::ShardedVectorEngine& self,
 						  const std::string& external_id,
 						  const py::array& vec) {
 			check_f32_1d(vec, "vec");
@@ -219,7 +221,7 @@ PYBIND11_MODULE(_brinicle, m) {
 		"Append one vector to the current ingest file")
 
 
-		.def("finalize", [](ghnsw_mgr::VectorEngine& self,
+		.def("finalize", [](ghnsw_mgr::ShardedVectorEngine& self,
 						const bool optimize,
 						std::size_t M,
 						std::size_t ef_construction,
@@ -244,21 +246,8 @@ PYBIND11_MODULE(_brinicle, m) {
 		"Finalize ingest and build/insert/upsert depending on init(mode).")
 
 
-		.def("build_from_file", [](ghnsw_mgr::VectorEngine& self,
-								   const std::string& vectors_path,
-								   const std::vector<std::string>& external_ids,
-								   const ghnsw::Params& build_params) {
-			py::gil_scoped_release rel;
-			self.build_from_file(vectors_path, external_ids, build_params);
-		},
-		py::arg("vectors_path"),
-		py::arg("external_ids"),
-		py::arg("build_params") = ghnsw::Params(),
-		"Build from a vector file path.")
-
-
 		.def("delete_items",
-			[](ghnsw_mgr::VectorEngine& self,
+			[](ghnsw_mgr::ShardedVectorEngine& self,
 			   const std::vector<std::string>& external_ids,
 			   bool return_not_found) -> py::tuple {
 
@@ -273,8 +262,9 @@ PYBIND11_MODULE(_brinicle, m) {
 					);
 				}
 
-				if (return_not_found)
+				if (return_not_found) {
 					return py::make_tuple(n, py::cast(not_found));
+				}
 
 				return py::make_tuple(n, py::none());
 			},
@@ -284,7 +274,7 @@ PYBIND11_MODULE(_brinicle, m) {
 		)
 
 
-		.def("rebuild_compact", [](ghnsw_mgr::VectorEngine& self,
+		.def("rebuild_compact", [](ghnsw_mgr::ShardedVectorEngine& self,
 						std::size_t M = 16,
 						std::size_t ef_construction = 200,
 						std::size_t ef_search = 64,
@@ -307,20 +297,21 @@ PYBIND11_MODULE(_brinicle, m) {
 		"Rebuild the index and clean up segments.")
 
 
-		.def("search", [](ghnsw_mgr::VectorEngine& self,
+		.def("search", [](ghnsw_mgr::ShardedVectorEngine& self,
 						  const py::array& q,
 						  int k,
 						  int efs,
-						  float threshold) {
+						  float threshold,
+						  int n_jobs) {
 			check_f32_1d(q, "q");
 			auto a = py::array_t<float, py::array::c_style | py::array::forcecast>(q);
-			if ((std::size_t)a.shape(0) != self.dim())
+			if ((std::size_t)a.shape(0) != self.dim()) {
 				throw std::runtime_error("search: dimension mismatch");
-
+			}
 			std::vector<std::string> out;
 			{
 				py::gil_scoped_release rel;
-				out = self.search(a.data(), k, efs, threshold);
+				out = self.search(a.data(), k, efs, threshold, n_jobs);
 			}
 			return out;
 		},
@@ -328,26 +319,22 @@ PYBIND11_MODULE(_brinicle, m) {
 		py::arg("k") = 10,
 		py::arg("efs") = 64,
 		py::arg("threshold") = std::numeric_limits<float>::infinity(),
+		py::arg("n_jobs") = 1,
 		"Search, and return external IDs")
 
-		.def("search_batch", [](ghnsw_mgr::VectorEngine& self,
+		.def("search_batch", [](ghnsw_mgr::ShardedVectorEngine& self,
 								const py::array& Q,
 								int k,
 								int efs,
 								float threshold,
 								int n_jobs) {
 			check_f32_2d(Q, "Q");
-
 			auto a = py::array_t<float, py::array::c_style | py::array::forcecast>(Q);
-
 			if ((std::size_t)a.shape(1) != self.dim()) {
 				throw std::runtime_error("search_batch: dimension mismatch");
 			}
-
 			std::size_t nq = static_cast<std::size_t>(a.shape(0));
-
 			std::vector<std::vector<std::string>> out;
-
 			{
 				py::gil_scoped_release rel;
 				out = self.search_batch(
@@ -359,7 +346,6 @@ PYBIND11_MODULE(_brinicle, m) {
 					n_jobs
 				);
 			}
-
 			return out;
 		},
 		py::arg("Q"),
@@ -368,21 +354,22 @@ PYBIND11_MODULE(_brinicle, m) {
 		py::arg("threshold") = std::numeric_limits<float>::infinity(),
 		py::arg("n_jobs") = 1,
 		"Batch search, and return external IDs for each query")
-		.def("search_with_distance", [](ghnsw_mgr::VectorEngine& self,
+
+		.def("search_with_distance", [](ghnsw_mgr::ShardedVectorEngine& self,
 										const py::array& q,
 										int k,
 										int efs,
-										float threshold) {
+										float threshold,
+										int n_jobs) {
 			check_f32_1d(q, "q");
 			auto a = py::array_t<float, py::array::c_style | py::array::forcecast>(q);
-
-			if ((std::size_t)a.shape(0) != self.dim())
+			if ((std::size_t)a.shape(0) != self.dim()) {
 				throw std::runtime_error("search_with_distance: dimension mismatch");
-
+			}
 			std::vector<std::pair<std::string, float>> out;
 			{
 				py::gil_scoped_release rel;
-				out = self.search_with_distance(a.data(), k, efs, threshold);
+				out = self.search_with_distance(a.data(), k, efs, threshold, n_jobs);
 			}
 			return out;
 		},
@@ -390,12 +377,15 @@ PYBIND11_MODULE(_brinicle, m) {
 		py::arg("k") = 10,
 		py::arg("efs") = 64,
 		py::arg("threshold") = std::numeric_limits<float>::infinity(),
-		"Search, and return external IDs")
+		py::arg("n_jobs") = 1,
+		"Search, and return external IDs with distances")
 
-		.def("needs_rebuild", &ghnsw_mgr::VectorEngine::needs_rebuild)
-		.def("optimize_graph", &ghnsw_mgr::VectorEngine::optimize_graph)
-		.def("close", &ghnsw_mgr::VectorEngine::close)
-		.def("destroy", &ghnsw_mgr::VectorEngine::destroy)
-		.def_property_readonly("dim", &ghnsw_mgr::VectorEngine::dim)
-		.def_property_readonly("has_index", &ghnsw_mgr::VectorEngine::has_index);
+		.def("needs_rebuild", &ghnsw_mgr::ShardedVectorEngine::needs_rebuild)
+		.def("optimize_graph", &ghnsw_mgr::ShardedVectorEngine::optimize_graph)
+		.def("close", &ghnsw_mgr::ShardedVectorEngine::close)
+		.def("destroy", &ghnsw_mgr::ShardedVectorEngine::destroy)
+		.def_property_readonly("dim", &ghnsw_mgr::ShardedVectorEngine::dim)
+		.def_property_readonly("has_index", &ghnsw_mgr::ShardedVectorEngine::has_index)
+		.def_property_readonly("n_shards", &ghnsw_mgr::ShardedVectorEngine::n_shards)
+		.def_property_readonly("generation", &ghnsw_mgr::ShardedVectorEngine::generation);
 }

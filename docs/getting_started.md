@@ -141,11 +141,11 @@ brinicle ranks results by ascending distance. Smaller distance means a better ma
 
 `VectorEngine` supports these distance functions:
 
-| Distance function      | Meaning                       |
-| ---------------------- | ----------------------------- |
-| `l2`                   | Squared Euclidean distance    |
-| `cosine_distance`      | `1 - cosine_similarity(a, b)` |
-| `dot_product_distance` | `-dot_product(a, b)`          |
+| Distance function      | Meaning                                 |
+| ---------------------- | --------------------------------------- |
+| `l2`                   | Squared Euclidean distance (default)    |
+| `cosine_distance`      | `1 - cosine_similarity(a, b)`           |
+| `dot_product_distance` | `-dot_product(a, b)`                    |
 
 ---
 
@@ -195,7 +195,7 @@ Delete records:
 engine.delete_items(["id1", "id2"])
 ```
 
-Deletes are logical until the index is compacted.
+Deletes are logical until the index is compacted. This behavior helps the graph to not degrade after deleting many elements.
 
 ---
 
@@ -210,7 +210,7 @@ brinicle provides maintenance methods for updated indexes.
 | `optimize_graph()`  | Rebuilds only when the index crosses the configured maintenance threshold         |
 
 `delta_ratio` controls when brinicle considers an index ready for maintenance.
-
+`delta_ratio` should be within (0, 0.5], the higher, the more tolerance for rebuilding. For instance, if the graph has 1M elements, delta_ratio=0.1 means the graph rebuilds after 100k (0.1 * 1M) updates (updates include insertion, deletion, and upsertion).
 ---
 
 ## Common Configuration Parameters
@@ -223,6 +223,7 @@ brinicle provides maintenance methods for updated indexes.
 | `ef_search`       | Query-time search width                             |
 | `delta_ratio`     | Maintenance threshold for delta and deleted records |
 | `build_n_threads` | Number of build threads                             |
+| `n_shards`        | Number of shards (default 1)                        |
 | `seed`            | Random seed for graph construction                  |
 
 Example:
@@ -235,6 +236,7 @@ engine = brinicle.VectorEngine(
     ef_construction=1024,
     ef_search=512,
     delta_ratio=0.1,
+    n_shards=1,
 )
 ```
 
