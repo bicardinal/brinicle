@@ -53,6 +53,7 @@ class ItemSearchEngine:
         alpha: float = 0.95,
         seed: int = 0,
         lexical_config: LexicalConfig | None = None,
+        n_shards: int = 1,
     ) -> None:
         if dim <= 0:
             raise ValueError("dim must be greater than 0")
@@ -61,7 +62,7 @@ class ItemSearchEngine:
         self._dim = int(dim)
         self._ef_search = int(ef_search)
         self.vector_dim = int(vector_dim)
-
+        self.n_shards = int(n_shards)
         self.encoder = LexicalEncoder(
             tokenizer_path=tokenizer_path,
             max_dim=self._dim,
@@ -85,6 +86,7 @@ class ItemSearchEngine:
             seed=seed,
             dist_func="lexical",
             lexical_config=self.lexical_config,
+            n_shards=self.n_shards,
         )
 
     def _alpha_weight(self, p: float) -> Tuple[float, float]:
@@ -186,6 +188,7 @@ class ItemSearchEngine:
         vector: np.ndarray = None,
         *,
         normalize: bool = False,
+        n_jobs: int = 1,
     ) -> list[str]:
 
         qvec = self._encode_query(
@@ -202,6 +205,7 @@ class ItemSearchEngine:
             k=k,
             efs=self._resolve_efs(efs),
             threshold=threshold,
+            n_jobs=n_jobs,
         )
 
     def search_batch(
@@ -373,6 +377,7 @@ class ItemSearchEngine:
         vector: np.ndarray = None,
         *,
         normalize: bool = False,
+        n_jobs: int = 1,
     ) -> list[tuple[str, float]]:
 
         qvec = self._encode_query(
@@ -389,6 +394,7 @@ class ItemSearchEngine:
             k=k,
             efs=self._resolve_efs(efs),
             threshold=threshold,
+            n_jobs=n_jobs,
         )
 
     def delete_items(

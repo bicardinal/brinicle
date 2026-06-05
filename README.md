@@ -1,5 +1,5 @@
 
-![Version 0.0.8](https://img.shields.io/badge/Version-0.0.8-green.svg)
+![Version 0.0.9](https://img.shields.io/badge/Version-0.0.9-green.svg)
 ![Python 3.12.x](https://img.shields.io/badge/Python-3.12.x-green.svg)
 ![Apache-2.0 License](https://img.shields.io/badge/License-Apache2.0-green.svg)
 
@@ -8,7 +8,7 @@
 brinicle is a disk-first HNSW retrieval engine for vector search, structured item search, hybrid search, and autocomplete.
 It gives you a simple Python API for building search over embeddings, product catalogs, structured records, and query suggestions without running a heavy search database.
 
-On 1.2 Million Amazon products, brinicle achieved 0.773ms p99 latency and 1,731 MB peak search memory, the lowest among brinicle, Meilisearch, OpenSearch, Typesense, and Weaviate. It also achieved the best Hit@1 and nDCG@10 in that benchmark.
+On 1.2 Million Amazon products, brinicle achieved sub-millisecond p99 latency and 1,731 MB peak search memory, the lowest among brinicle, Meilisearch, OpenSearch, Typesense, and Weaviate. It also achieved the best Hit@1 and nDCG@10 in that benchmark.
 
 ```bash
 pip install brinicle

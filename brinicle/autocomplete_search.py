@@ -41,6 +41,7 @@ class AutocompleteEngine:
         build_n_threads: int = 1,
         seed: int = 0,
         autocomplete_config: AutocompleteConfig | None = None,
+        n_shards: int = 1,
     ) -> None:
         if dim <= 1:
             raise ValueError("dim must be greater than 1")
@@ -50,7 +51,7 @@ class AutocompleteEngine:
         self.index_path = str(index_path)
         self._dim = int(dim)
         self._ef_search = int(ef_search)
-
+        self.n_shards = int(n_shards)
         self.encoder = LexicalEncoder(
             tokenizer_path=tokenizer_path,
             max_dim=self._dim,
@@ -74,6 +75,7 @@ class AutocompleteEngine:
             seed=seed,
             dist_func="autocomplete",
             autocomplete_config=self.autocomplete_config,
+            n_shards=self.n_shards,
         )
 
     def init(self, mode: str = "build") -> None:
@@ -126,6 +128,7 @@ class AutocompleteEngine:
         threshold: float = math.inf,
         *,
         normalize: bool = True,
+        n_jobs: int = 1,
     ) -> list[str]:
         qvec = self.encoder.encode_query_autocomplete_vector(
             query,
@@ -137,6 +140,7 @@ class AutocompleteEngine:
             k=k,
             efs=self._resolve_efs(efs),
             threshold=threshold,
+            n_jobs=n_jobs,
         )
 
     def search_with_distance(
@@ -147,6 +151,7 @@ class AutocompleteEngine:
         threshold: float = math.inf,
         *,
         normalize: bool = True,
+        n_jobs: int = 1,
     ) -> list[tuple[str, float]]:
         qvec = self.encoder.encode_query_autocomplete_vector(
             query,
@@ -158,6 +163,7 @@ class AutocompleteEngine:
             k=k,
             efs=self._resolve_efs(efs),
             threshold=threshold,
+            n_jobs=n_jobs,
         )
 
     def search_batch(

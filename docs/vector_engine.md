@@ -1,20 +1,21 @@
 # Vector Engine
 
-`VectorEngine` is the raw vector search engine in Brinicle.
+`VectorEngine` is brinicle's low-level engine for raw vector similarity search.
 
-Use it when you already have embeddings or numeric vectors and want approximate nearest neighbor search through a disk-first HNSW index.
+Use it when you already have embeddings or numeric vectors and want disk-first HNSW approximate nearest-neighbor search without item-level lexical encoding.
 
-`VectorEngine` supports:
+It supports:
 
-* build
-* insert
-* upsert
-* delete
+* raw vector search
 * single-query search
 * batch search
 * search with distances
-* compact rebuild
-* graph optimization
+* local sharding for large indexes
+* insert, upsert, and delete
+* compact rebuild and graph optimization
+* optional build-time threading
+
+`VectorEngine` is the lowest-level public engine in brinicle. Higher-level engines such as `ItemSearchEngine` and `AutocompleteEngine` use the same disk-first HNSW infrastructure, but encode their inputs before indexing and searching.
 
 ---
 
@@ -23,7 +24,7 @@ Use it when you already have embeddings or numeric vectors and want approximate 
 ```python
 engine = brinicle.VectorEngine(
     index_path,
-    dim,
+    dim=0,
     delta_ratio=0.10,
     M=16,
     ef_construction=200,
@@ -31,22 +32,30 @@ engine = brinicle.VectorEngine(
     build_n_threads=1,
     seed=0,
     dist_func="l2",
+    lexical_config=None,
+    autocomplete_config=None,
+    n_shards=1,
 )
 ```
 
 ### Parameters
 
-| Parameter         | Meaning                                             |
-| ----------------- | --------------------------------------------------- |
-| `index_path`      | Base path for the index files                       |
-| `dim`             | Vector dimension                                    |
-| `delta_ratio`     | Maintenance threshold for delta and deleted records |
-| `M`               | HNSW graph connectivity                             |
-| `ef_construction` | Build-time search width                             |
-| `ef_search`       | Default query-time search width                     |
-| `build_n_threads` | Number of build threads                             |
-| `seed`            | Random seed for graph construction                  |
-| `dist_func`       | Distance function used by the index                 |
+| Parameter             | Meaning                                                     |
+| --------------------- | ----------------------------------------------------------- |
+| `index_path`          | Base path for the index files                               |
+| `dim`                 | Vector dimension. Use `0` only when loading an existing index |
+| `delta_ratio`         | Maintenance threshold for delta and deleted records         |
+| `M`                   | HNSW graph connectivity                                     |
+| `ef_construction`     | Build-time search width                                     |
+| `ef_search`           | Default query-time search width                             |
+| `build_n_threads`     | Number of build threads                                     |
+| `seed`                | Random seed for graph construction                          |
+| `dist_func`           | Distance function name. Use `"l2"` for normal vector search |
+| `lexical_config`      | Advanced/internal scoring config used by higher-level engines |
+| `autocomplete_config` | Advanced/internal scoring config used by higher-level engines |
+| `n_shards`            | Number of local shards used when building the index         |
+
+For normal vector search, leave `dist_func`, `lexical_config`, and `autocomplete_config` at their defaults.
 
 Example:
 
@@ -57,9 +66,68 @@ engine = brinicle.VectorEngine(
     M=48,
     ef_construction=1024,
     ef_search=512,
+    build_n_threads=4,
     delta_ratio=0.1,
 )
 ```
+
+---
+
+## Local Sharding
+
+`n_shards` controls how many local shards brinicle creates for the index during build.
+
+The current sharding implementation is local sharding. It is not distributed sharding across multiple machines.
+
+During insertion, brinicle uses hash-based routing to decide which shard receives each vector. During search, brinicle searches all shards, then merges the partial results into a final ranked result list.
+
+For multi-shard indexes, search methods accept `n_jobs`, which controls how many shards are searched in parallel.
+
+Higher `n_jobs` can reduce search latency, but it also increases CPU and I/O usage.
+
+Example:
+
+```python
+engine = brinicle.VectorEngine(
+    "large_vector_index",
+    dim=384,
+    M=48,
+    ef_construction=1024,
+    ef_search=512,
+    build_n_threads=8,
+    n_shards=50,
+)
+
+results = engine.search(
+    query_vector,
+    k=10,
+    n_jobs=8,
+)
+```
+
+As a practical starting point, keep `n_shards=1` for smaller indexes. Sharding becomes more useful when the index contains more than about 2 million elements. For example, for an index with around 100 million elements, `n_shards=50` can be a reasonable starting point.
+
+Benchmark `n_shards` and `n_jobs` with your real data and hardware, because the best values depend on vector count, vector dimension, storage speed, and available CPU cores.
+
+---
+
+## Vector Format
+
+Vectors must be one-dimensional `float32` arrays during ingest and search.
+
+```python
+import numpy as np
+
+vec = np.random.randn(384).astype("float32")
+```
+
+For batch search, queries must be a two-dimensional `float32` array:
+
+```python
+queries = np.random.randn(100, 384).astype("float32")
+```
+
+Each query vector must have the same dimension as the index.
 
 ---
 
@@ -73,7 +141,7 @@ engine = brinicle.VectorEngine(
 | `"cosine_distance"`      | `1 - cosine_similarity(a, b)` |
 | `"dot_product_distance"` | `-dot_product(a, b)`          |
 
-Brinicle ranks results by ascending distance.
+brinicle ranks results by ascending distance.
 
 Smaller distance means a better match.
 
@@ -88,28 +156,46 @@ So the result with distance `-0.90` is ranked before the result with distance `-
 
 ---
 
-## Building an Index
-
-Use `build` mode to create a new index.
+## Basic Build Example
 
 ```python
 import numpy as np
 import brinicle
 
-dim = 128
+dim = 384
+n = 1000
 
-engine = brinicle.VectorEngine("vector_index", dim=dim)
+X = np.random.randn(n, dim).astype("float32")
+Q = np.random.randn(dim).astype("float32")
+
+engine = brinicle.VectorEngine(
+    "vector_index",
+    dim=dim,
+    M=48,
+    ef_construction=1024,
+    ef_search=512,
+)
 
 engine.init(mode="build")
 
-for i in range(1000):
-    vector = np.random.randn(dim).astype("float32")
-    engine.ingest(str(i), vector)
+for i in range(n):
+    engine.ingest(
+        external_id=str(i),
+        vec=X[i],
+    )
 
 engine.finalize()
+
+results = engine.search(Q, k=10)
+
+print(results)
 ```
 
-Vectors must be one-dimensional `float32` arrays with the same dimension as the index.
+`search(...)` returns external IDs:
+
+```python
+["37", "911", "104"]
+```
 
 ---
 
@@ -118,11 +204,13 @@ Vectors must be one-dimensional `float32` arrays with the same dimension as the 
 Use `search(...)` to return external IDs only.
 
 ```python
-query = np.random.randn(dim).astype("float32")
-
-results = engine.search(query, k=10)
-
-print(results)
+results = engine.search(
+    q,
+    k=10,
+    efs=64,
+    threshold=float("inf"),
+    n_jobs=1,
+)
 ```
 
 Example output:
@@ -131,49 +219,54 @@ Example output:
 ["42", "18", "901"]
 ```
 
-### Search Parameters
+### Parameters
+
+| Parameter   | Meaning                                                       |
+| ----------- | ------------------------------------------------------------- |
+| `q`         | Query vector as a one-dimensional `float32` array              |
+| `k`         | Maximum number of results                                     |
+| `efs`       | Query-time search width                                       |
+| `threshold` | Maximum accepted distance                                     |
+| `n_jobs`    | Number of shards to search in parallel on multi-shard indexes |
+
+For `n_shards=1`, you can usually ignore `n_jobs`.
+
+Example:
 
 ```python
-engine.search(
-    q,
+results = engine.search(
+    Q,
     k=10,
-    efs=64,
-    threshold=float("inf"),
+    efs=128,
 )
+
+print(results)
 ```
-
-| Parameter   | Meaning                   |
-| ----------- | ------------------------- |
-| `q`         | Query vector              |
-| `k`         | Maximum number of results |
-| `efs`       | Query-time search width   |
-| `threshold` | Maximum accepted distance |
-
-Increasing `efs` usually improves recall, but increases query latency.
 
 ---
 
 ## Search with Distance
 
-Use `search_with_distance(...)` to return both IDs and distances.
+Use `search_with_distance(...)` to return IDs and distances.
 
 ```python
-results = engine.search_with_distance(query, k=10)
-
+results = engine.search_with_distance(
+    Q,
+    k=10,
+    efs=128,
+)
 print(results)
 ```
 
 Example output:
 
 ```python
-[("42", 0.183), ("18", 0.241)]
+[("37", 0.18), ("911", 0.21), ("104", 0.27)]
 ```
 
-The result format is:
+Smaller distance means a better match.
 
-```python
-[(external_id, distance), ...]
-```
+On multi-shard indexes, use `n_jobs` to control how many shards are searched in parallel if your installed version exposes it for this method.
 
 ---
 
@@ -182,33 +275,46 @@ The result format is:
 Use `search_batch(...)` to search multiple query vectors.
 
 ```python
-queries = np.random.randn(100, dim).astype("float32")
-
 results = engine.search_batch(
-    queries,
+    Qs,
     k=10,
-    efs=64,
+    efs=128,
+    threshold=float("inf"),
     n_jobs=4,
 )
 ```
 
-`queries` must be a two-dimensional `float32` array:
+`Qs` must be a two-dimensional `float32` array with shape:
 
 ```text
-(num_queries, dim)
+(number_of_queries, dim)
 ```
 
-The return value contains one result list per query:
+Example:
+
+```python
+queries = np.random.randn(32, dim).astype("float32")
+
+results = engine.search_batch(
+    queries,
+    k=10,
+    efs=128,
+    n_jobs=4,
+)
+
+print(results)
+```
+
+Example output:
 
 ```python
 [
-    ["42", "18", "901"],
-    ["7", "103", "88"],
-    ...
+    ["37", "911", "104"],
+    ["12", "73", "88"],
 ]
 ```
 
-`n_jobs` controls parallel query execution when parallel execution is available.
+`n_jobs` controls query-level parallelism and, on multi-shard indexes, shard-level parallelism. Higher values can reduce latency, but they also consume more CPU and I/O.
 
 ---
 
@@ -217,42 +323,54 @@ The return value contains one result list per query:
 Use `insert` mode to add new vectors to an existing index.
 
 ```python
+new_vectors = np.random.randn(100, dim).astype("float32")
+
 engine.init(mode="insert")
 
-engine.ingest("new_id", new_vector)
+for i in range(100):
+    engine.ingest(
+        external_id=f"new_{i}",
+        vec=new_vectors[i],
+    )
 
 engine.finalize()
 ```
 
-Inserted records are added through the delta index. This allows Brinicle to accept updates without rebuilding the full main index after every insert.
+Inserted records are added through the delta index. This allows brinicle to accept updates without rebuilding the full main index after every insert.
 
 ---
 
 ## Upsert
 
-Use `upsert` mode to replace existing records or insert new records.
+Use `upsert` mode to replace existing vectors or insert new ones.
 
 ```python
+replacement_vectors = np.random.randn(100, dim).astype("float32")
+
 engine.init(mode="upsert")
 
-engine.ingest("id1", updated_vector)
+for i in range(100):
+    engine.ingest(
+        external_id=str(i),
+        vec=replacement_vectors[i],
+    )
 
 engine.finalize()
 ```
 
-If `"id1"` already exists, Brinicle marks the old record as deleted and inserts the new version.
+If the external ID already exists, brinicle marks the old record as deleted and inserts the new version.
 
-If `"id1"` does not exist, it is inserted as a new record.
+If the external ID does not exist, the vector is inserted as a new record.
 
 ---
 
 ## Delete
 
-Use `delete_items(...)` to delete records by external ID.
+Use `delete_items(...)` to delete vectors by external ID.
 
 ```python
 deleted_count, not_found = engine.delete_items(
-    ["id1", "id2"],
+    ["37", "911"],
     return_not_found=True,
 )
 
@@ -262,34 +380,19 @@ print(not_found)
 
 If `return_not_found=False`, the second returned value is `None`.
 
-Deletes are logical until the index is compacted. Deleted records are filtered out during search, but their storage is reclaimed during compact rebuild.
+Deletes are logical until compact rebuild.
 
 ---
 
-## Finalize Options
+## Rebuild and Optimize
 
-`finalize(...)` completes a pending `build`, `insert`, or `upsert`.
+Vector indexes use the same maintenance model as the higher-level engines.
 
 ```python
-engine.finalize(
-    optimize=False,
-    M=0,
-    ef_construction=0,
-    ef_search=0,
-    build_n_threads=0,
-    seed=0,
-)
+engine.needs_rebuild()
 ```
 
-Passing `0` for build parameters uses the engine defaults.
-
-When `optimize=False`, inserts and upserts are absorbed into the delta index.
-
-When `optimize=True`, Brinicle may rebuild the index if the projected delta size crosses the maintenance threshold controlled by `delta_ratio`.
-
----
-
-## Rebuild and Compact
+Returns whether the index has enough update or delete drift to justify rebuilding.
 
 Use `rebuild_compact(...)` to rebuild the index from alive records.
 
@@ -315,59 +418,56 @@ engine.rebuild_compact(
 )
 ```
 
----
-
-## Optimize Graph
-
 Use `optimize_graph(...)` to run conditional maintenance.
 
 ```python
 engine.optimize_graph()
 ```
 
-`optimize_graph()` checks whether the index needs rebuilding. If the update or delete ratio crosses the `delta_ratio` threshold, Brinicle rebuilds the graph. Otherwise, it does nothing.
+`optimize_graph()` checks whether the index needs rebuilding. If the update or delete ratio crosses the `delta_ratio` threshold, brinicle rebuilds the graph. Otherwise, it does nothing.
 
 For unconditional compaction, use `rebuild_compact()`.
 
----
-
-## Index State
-
-```python
-engine.has_index
-```
-
-Returns whether the engine currently has a loaded main or delta index.
-
-```python
-engine.dim
-```
-
-Returns the vector dimension of the index.
-
-```python
-engine.needs_rebuild()
-```
-
-Returns whether the index has enough delta or deleted records to justify a rebuild.
 
 ---
 
-## Close and Destroy
+## Loading an Existing Index
 
-Close loaded index resources:
+To load an existing index, create `VectorEngine` with the same `index_path`.
 
-```python
-engine.close()
-```
-
-Destroy the index files:
+If the dimension is already stored in the index, use `dim=0`.
 
 ```python
-engine.destroy()
+engine = brinicle.VectorEngine(
+    "vector_index",
+    dim=0,
+)
+
+results = engine.search(Q, k=10)
 ```
 
-`destroy()` removes the index from disk.
+Use this for read/search sessions after an index has already been built.
+
+---
+
+## HNSW Tuning Notes
+
+`M`, `ef_construction`, and `ef_search` control the usual HNSW tradeoffs.
+
+| Parameter         | Effect                                                            |
+| ----------------- | ----------------------------------------------------------------- |
+| `M`               | Higher values usually improve recall but increase index size       |
+| `ef_construction` | Higher values usually improve graph quality but slow down build    |
+| `ef_search`       | Higher values usually improve recall but slow down query latency   |
+| `build_n_threads` | Higher values can speed up build but increase CPU usage            |
+| `delta_ratio`     | Lower values trigger rebuild/optimization sooner after changes     |
+
+For large indexes, tune `n_shards` and `n_jobs` together:
+
+| Parameter  | Effect                                                            |
+| ---------- | ----------------------------------------------------------------- |
+| `n_shards` | Splits the index into multiple local shards during build           |
+| `n_jobs`   | Searches multiple shards or batch queries in parallel              |
 
 ---
 
@@ -394,12 +494,13 @@ upsert
 ### `ingest`
 
 ```python
-engine.ingest(external_id, vector)
+engine.ingest(
+    external_id,
+    vec,
+)
 ```
 
-Adds one vector to the current pending write session.
-
-Call `init(...)` before calling `ingest(...)`.
+Adds one vector to the current write session.
 
 ---
 
@@ -418,6 +519,8 @@ engine.finalize(
 
 Completes the pending write session.
 
+Passing `0` for build parameters means brinicle should use the parameters already configured on the engine.
+
 ---
 
 ### `search`
@@ -428,6 +531,7 @@ engine.search(
     k=10,
     efs=64,
     threshold=float("inf"),
+    n_jobs=1,
 )
 ```
 
@@ -443,6 +547,7 @@ engine.search_with_distance(
     k=10,
     efs=64,
     threshold=float("inf"),
+    n_jobs=1,
 )
 ```
 
@@ -462,7 +567,7 @@ engine.search_batch(
 )
 ```
 
-Runs batch search over a two-dimensional query matrix.
+Runs batch search over multiple query vectors.
 
 ---
 
@@ -475,7 +580,7 @@ engine.delete_items(
 )
 ```
 
-Deletes records by external ID.
+Deletes vectors by external ID.
 
 ---
 
@@ -532,3 +637,19 @@ engine.destroy()
 ```
 
 Removes index files from disk.
+
+---
+
+## Properties
+
+```python
+engine.dim
+```
+
+Returns the vector dimension.
+
+```python
+engine.has_index
+```
+
+Returns whether the engine has a loaded index.
