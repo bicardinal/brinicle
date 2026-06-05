@@ -61,7 +61,7 @@ On SIFT 1M vectors, using the same in-process deployment model as FAISS and hnsw
 |---|---:|---:|---:|---:|
 | faiss | 237.282 | 0.96999 | 0.092 | 10857.43 |
 | hnswlib | 241.301 | 0.96364 | 0.093 | 10711.86 |
-| brinicle | 243.75 | 0.96989 | 0.103 | 9730.65 |
+| brinicle | 234.572 | 0.97004 | 0.095 | 10563.05 |
 
 In this benchmark suite, brinicle stays close to FAISS and hnswlib latency while using a disk-backed index design.
 
