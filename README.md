@@ -1,3 +1,10 @@
+<p align="center">
+  <img
+    src="./docs/brinicle-header.png"
+    alt="Brinicle — disk-first vector search engine"
+    width="100%"
+  />
+</p>
 
 ![Version 0.0.9](https://img.shields.io/badge/Version-0.0.9-green.svg)
 ![Python 3.12.x](https://img.shields.io/badge/Python-3.12.x-green.svg)
