@@ -5,10 +5,13 @@
     width="100%"
   />
 </p>
+<center>
+  
+<p align="center">
+  <a href="https://github.com/bicardinal/brinicle/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/brinicle" alt="License"></a>
+  <a href="https://pypi.org/project/brinicle/"><img src="https://img.shields.io/pypi/v/brinicle?label=pypi&color=blue" alt="PyPI version"></a>
+</p>
 
-![Version 0.0.9](https://img.shields.io/badge/Version-0.0.9-green.svg)
-![Python 3.12.x](https://img.shields.io/badge/Python-3.12.x-green.svg)
-![Apache-2.0 License](https://img.shields.io/badge/License-Apache2.0-green.svg)
 
 # brinicle
 
