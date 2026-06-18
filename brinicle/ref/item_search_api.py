@@ -293,8 +293,6 @@ async def ingest_single(request: Request):
         raise HTTPException(status_code=400, detail=f"Failed to ingest item: {str(e)}")
 
 
-
-
 @app.post("/ingest/batch")
 async def ingest_batch(request: Request):
 

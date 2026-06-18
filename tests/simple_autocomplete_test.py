@@ -137,9 +137,15 @@ class AutocompleteEngineSimpleTests:
 
         iphone_results = ac.search("iph", k=4)
 
-        assert "iphone 15 pro max" in iphone_results, "missing original iphone suggestion"
-        assert "iphone 15 case" in iphone_results, "missing inserted iphone case suggestion"
-        assert "iphone charger cable" in iphone_results, "missing inserted iphone charger suggestion"
+        assert (
+            "iphone 15 pro max" in iphone_results
+        ), "missing original iphone suggestion"
+        assert (
+            "iphone 15 case" in iphone_results
+        ), "missing inserted iphone case suggestion"
+        assert (
+            "iphone charger cable" in iphone_results
+        ), "missing inserted iphone charger suggestion"
 
         ac.close()
 
@@ -225,8 +231,12 @@ class AutocompleteEngineSimpleTests:
 
         iphone_results = ac.search("iph", k=5)
 
-        assert "iphone 15 pro max" in iphone_results, "remaining iphone suggestion missing"
-        assert "iphone 15 case" not in iphone_results, "deleted iphone suggestion still appears"
+        assert (
+            "iphone 15 pro max" in iphone_results
+        ), "remaining iphone suggestion missing"
+        assert (
+            "iphone 15 case" not in iphone_results
+        ), "deleted iphone suggestion still appears"
 
         ac.close()
 
@@ -260,9 +270,15 @@ class AutocompleteEngineSimpleTests:
         before = ac.search("", k=100)
 
         assert len(before) == 97, "invalid result count before rebuild"
-        assert "rebuild suggestion 1" not in before, "deleted id 1 appears before rebuild"
-        assert "rebuild suggestion 2" not in before, "deleted id 2 appears before rebuild"
-        assert "rebuild suggestion 3" not in before, "deleted id 3 appears before rebuild"
+        assert (
+            "rebuild suggestion 1" not in before
+        ), "deleted id 1 appears before rebuild"
+        assert (
+            "rebuild suggestion 2" not in before
+        ), "deleted id 2 appears before rebuild"
+        assert (
+            "rebuild suggestion 3" not in before
+        ), "deleted id 3 appears before rebuild"
 
         ac.rebuild_compact(
             M=16,
@@ -276,11 +292,7 @@ class AutocompleteEngineSimpleTests:
 
         after = ac.search("", k=100)
 
-        expected = [
-            f"rebuild suggestion {i}"
-            for i in range(100)
-            if i not in (1, 2, 3)
-        ]
+        expected = [f"rebuild suggestion {i}" for i in range(100) if i not in (1, 2, 3)]
 
         assert len(after) == 97, "invalid result count after rebuild"
         assert len(set(after)) == 97, "duplicate results after rebuild"
@@ -324,9 +336,13 @@ class AutocompleteEngineSimpleTests:
             "iphone 15 pro max",
             "iphone 15 case",
         }, "invalid iphone batch result"
-        assert results[1][0] == "samsung galaxy s24 ultra", "invalid samsung batch result"
+        assert (
+            results[1][0] == "samsung galaxy s24 ultra"
+        ), "invalid samsung batch result"
         assert results[2][0] == "google pixel 8 pro", "invalid google batch result"
-        assert results[3][0] == "logitech wireless mouse", "invalid logitech batch result"
+        assert (
+            results[3][0] == "logitech wireless mouse"
+        ), "invalid logitech batch result"
 
         ac.close()
 
@@ -396,7 +412,11 @@ class AutocompleteEngineSimpleTests:
         results = ac.search("iphone", k=1)
 
         assert len(results) == 1, "invalid result length"
-        assert results[0] in ("q1", "q2", "q3"), "search should return external id, not text"
+        assert results[0] in (
+            "q1",
+            "q2",
+            "q3",
+        ), "search should return external id, not text"
 
         all_results = ac.search("", k=3)
 
