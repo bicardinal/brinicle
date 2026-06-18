@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Any
 from typing import Mapping
 from typing import Optional
-from typing import Union
-from typing import Tuple
 from typing import Sequence
+from typing import Tuple
+from typing import Union
 
 import numpy as np
 

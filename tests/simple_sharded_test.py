@@ -130,8 +130,12 @@ class VectorEngineShardingSimpleTests:
         result_with_distance = engine.search_with_distance(q, k=1, efs=256)
 
         assert len(result_with_distance) == 1, "invalid top1 distance result length"
-        assert result_with_distance[0][0] == str(target), "exact vector should be top1 with distance"
-        assert abs(result_with_distance[0][1]) < 1e-5, "exact vector distance should be near zero"
+        assert result_with_distance[0][0] == str(
+            target
+        ), "exact vector should be top1 with distance"
+        assert (
+            abs(result_with_distance[0][1]) < 1e-5
+        ), "exact vector distance should be near zero"
 
         engine.close()
 
@@ -164,7 +168,9 @@ class VectorEngineShardingSimpleTests:
         results = engine.search_with_distance(q, k=20, efs=128)
 
         assert len(results) == 20, "invalid search_with_distance length"
-        assert len(set(r[0] for r in results)) == 20, "duplicate ids in distance results"
+        assert (
+            len(set(r[0] for r in results)) == 20
+        ), "duplicate ids in distance results"
 
         distances = [r[1] for r in results]
 
@@ -214,10 +220,16 @@ class VectorEngineShardingSimpleTests:
 
         all_results = engine.search(q, k=base_n + insert_n, efs=base_n + insert_n)
 
-        expected_ids = [str(i) for i in range(base_n)] + [f"inserted_{i}" for i in range(insert_n)]
+        expected_ids = [str(i) for i in range(base_n)] + [
+            f"inserted_{i}" for i in range(insert_n)
+        ]
 
-        assert len(all_results) == base_n + insert_n, "invalid result count after insert"
-        assert len(set(all_results)) == base_n + insert_n, "duplicate results after insert"
+        assert (
+            len(all_results) == base_n + insert_n
+        ), "invalid result count after insert"
+        assert (
+            len(set(all_results)) == base_n + insert_n
+        ), "duplicate results after insert"
         assert sorted(all_results) == sorted(expected_ids), "inserted ids not found"
 
         engine.close()
@@ -226,7 +238,9 @@ class VectorEngineShardingSimpleTests:
         D = 8
 
         old_vec = np.array([10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        other_vec = np.array([0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        other_vec = np.array(
+            [0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32
+        )
         new_vec = np.array([0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
         engine = brinicle.VectorEngine(
@@ -376,10 +390,78 @@ class VectorEngineShardingSimpleTests:
 
         X = np.array(
             [
-                [10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                [0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                [0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                [0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [
+                    10.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+                [
+                    0.0,
+                    10.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+                [
+                    0.0,
+                    0.0,
+                    10.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    10.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
             ],
             dtype=np.float32,
         )
@@ -466,7 +548,9 @@ class VectorEngineShardingSimpleTests:
 
         result = reopened.search(X[target], k=1, efs=256)
 
-        assert result == [str(target)], "reopened sharded index failed exact top1 search"
+        assert result == [
+            str(target)
+        ], "reopened sharded index failed exact top1 search"
         assert reopened.n_shards == 10, "reopened index has invalid shard count"
 
         reopened.close()
@@ -501,7 +585,9 @@ class VectorEngineShardingSimpleTests:
             )
             assert False, "opening with wrong n_shards should fail"
         except RuntimeError as e:
-            assert "n_shards mismatch" in str(e), "invalid n_shards mismatch error message"
+            assert "n_shards mismatch" in str(
+                e
+            ), "invalid n_shards mismatch error message"
 
     def test_sharded_dimension_validation(self):
         D = 16
@@ -521,7 +607,9 @@ class VectorEngineShardingSimpleTests:
             engine.ingest("bad", bad_vec)
             assert False, "ingest dimension mismatch should raise RuntimeError"
         except RuntimeError as e:
-            assert "dimension mismatch" in str(e), "invalid ingest dimension error message"
+            assert "dimension mismatch" in str(
+                e
+            ), "invalid ingest dimension error message"
 
         engine.ingest("good", good_vec)
         engine.finalize()
@@ -532,7 +620,9 @@ class VectorEngineShardingSimpleTests:
             engine.search(bad_q, k=1)
             assert False, "search dimension mismatch should raise RuntimeError"
         except RuntimeError as e:
-            assert "dimension mismatch" in str(e), "invalid search dimension error message"
+            assert "dimension mismatch" in str(
+                e
+            ), "invalid search dimension error message"
 
         engine.close()
 

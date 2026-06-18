@@ -121,7 +121,9 @@ class ItemSearchEngineSimpleTests:
 
         assert len(search) == k, "invalid initial search length"
         assert len(set(search)) == k, "duplicate initial results"
-        assert sorted(search, key=int) == [str(i) for i in range(n)], "invalid initial ids"
+        assert sorted(search, key=int) == [
+            str(i) for i in range(n)
+        ], "invalid initial ids"
 
         engine.init(mode="insert")
 
@@ -517,7 +519,9 @@ class ItemSearchEngineSimpleTests:
             )
             assert False, "categories length mismatch should raise ValueError"
         except ValueError as e:
-            assert "categories length mismatch" in str(e), "invalid categories error message"
+            assert "categories length mismatch" in str(
+                e
+            ), "invalid categories error message"
 
         try:
             engine.search_batch(
@@ -526,7 +530,9 @@ class ItemSearchEngineSimpleTests:
             )
             assert False, "subcategories length mismatch should raise ValueError"
         except ValueError as e:
-            assert "subcategories length mismatch" in str(e), "invalid subcategories error message"
+            assert "subcategories length mismatch" in str(
+                e
+            ), "invalid subcategories error message"
 
         try:
             engine.search_batch(
@@ -535,7 +541,9 @@ class ItemSearchEngineSimpleTests:
             )
             assert False, "attributes_list length mismatch should raise ValueError"
         except ValueError as e:
-            assert "attributes_list length mismatch" in str(e), "invalid attributes_list error message"
+            assert "attributes_list length mismatch" in str(
+                e
+            ), "invalid attributes_list error message"
 
         try:
             engine.search_batch(
@@ -544,7 +552,9 @@ class ItemSearchEngineSimpleTests:
             )
             assert False, "single mapping attributes_list should raise TypeError"
         except TypeError as e:
-            assert "attributes_list must be a sequence" in str(e), "invalid attributes_list type error"
+            assert "attributes_list must be a sequence" in str(
+                e
+            ), "invalid attributes_list type error"
 
         engine.close()
 
@@ -581,7 +591,9 @@ class ItemSearchEngineSimpleTests:
             )
             assert False, "vectors dimension mismatch should raise ValueError"
         except ValueError as e:
-            assert "vectors dimension mismatch" in str(e), "invalid vectors dimension error"
+            assert "vectors dimension mismatch" in str(
+                e
+            ), "invalid vectors dimension error"
 
         engine.close()
 
