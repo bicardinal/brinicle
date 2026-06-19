@@ -437,9 +437,92 @@ In this example, the empty search query tells brinicle not to use a title query.
 
 ## Vector Search with Parameter Filtering
 
-Use this setup when retrieval should be vector-based, but category, subcategory, or attributes should still be used as filters.
+Use this mode when retrieval should be driven by vectors, but `category`,
+`subcategory`, or `attributes` should also constrain which items can match.
+The constraint is tunable: with small weights it acts as a ranking bias, and
+with a large penalty plus a `threshold` it acts as a hard filter that excludes
+non-matching items entirely.
 
-In this mode, do not use the title as a lexical signal. Pass an empty string as the item title and query, then use a custom `LexicalConfig` that disables title weights at build time and search time.
+Turn the title off so it contributes no lexical signal: pass an empty string as
+the item title and the query, and set the title weights to `0.0` at both build
+time and search time.
+
+---
+
+### How the distance is computed
+
+For item search, brinicle scores every candidate with a single distance that is
+an **additive, weighted sum** of per-field distances:
+
+```
+distance(query, item) =
+      w_title       * title_distance
+    + w_attr        * attribute_distance
+    + w_category    * category_distance
+    + w_subcategory * subcategory_distance
+    + w_vector      * vector_distance
+```
+
+This sum is **not** normalized to any fixed range. Its scale depends entirely on
+the weights and penalties you set, so there is no built-in "maximum distance."
+
+| Field | Distance contribution |
+| --- | --- |
+| `title` | Tversky distance over title tokens, in `[0, 1]` (Jaccard when `alpha = beta = 1`). |
+| `attributes` | `0` when no shared key has a differing value; a large fixed penalty (`1e8` in the current implementation) when at least one shared key differs at search time; `0.5` when the query has attributes but the item has none. |
+| `category` | `0` when the two ids are equal, or when either side is unset; otherwise `category_penalty`. |
+| `subcategory` | Same rule as `category`, using the same `category_penalty`. |
+| `vector` | Cosine distance (`1 - cosine_similarity`), in `[0, 2]` for L2-normalized vectors. |
+
+A field only constrains results when it is set on **both** the query and the
+item. If either side leaves a field unset, that field contributes `0`.
+
+---
+
+### The `threshold` parameter
+
+A candidate is kept only if `distance < threshold`. The default is `+inf`, which
+keeps everything; a **smaller** threshold is **stricter**. There is nothing
+special about any particular value such as `3.0`: the threshold is simply an
+upper bound on the summed distance.
+
+Filtering works by making a mismatch add enough distance to cross the threshold:
+
+- A **matching** item carries no mismatch penalty, so its distance is roughly
+  `w_vector * vector_distance`, at most `w_vector * 2` for normalized vectors.
+- A **mismatching** item carries the mismatch penalty on top, so its distance is
+  at least `weight * penalty`.
+
+For the threshold to act as a hard filter, place it between those two ranges:
+
+```
+max_matching_distance  <  threshold  <  mismatch_penalty_contribution
+```
+
+If you do not set a finite threshold, a mismatch only **down-ranks** an item; it
+does not remove it. With a small penalty, no threshold can cleanly separate the
+two groups, so the field behaves as a soft bias rather than a filter.
+
+---
+
+### Soft bias vs hard filter
+
+The same machinery covers both regimes:
+
+- **Soft bias**: keep the penalty/weight small (e.g. default `category_penalty
+  = 1.0`, `w_category = 0.1`). A category mismatch adds only `0.1`, which is well
+  within the vector-distance range, so matching and non-matching items interleave
+  by vector similarity.
+- **Hard filter**: make the mismatch penalty dominate the vector range and add a
+  finite threshold. For example with `w_vector = 1.0`, `w_category = 1.0`, and
+  `category_penalty = 1e8`: matching items land in `[0, 2]` while non-matching
+  items land at `>= 1e8`, so any threshold in `(2, 1e8)` excludes every
+  non-matching item. Matching items still rank purely by vector distance, because
+  their category contribution is `0`.
+
+---
+
+### Example: hard filter on a key via `category`
 
 ```python
 import numpy as np
@@ -448,19 +531,25 @@ import brinicle
 vector_dim = 384
 
 cfg = brinicle.LexicalConfig()
+
+# title off: no lexical text signal
 cfg.build_title_weight = 0.0
 cfg.search_title_weight = 0.0
 
+# vector drives ranking
 cfg.build_vector_weight = 1.0
 cfg.search_vector_weight = 1.0
 
-cfg.search_attr_weight = 0.2
-cfg.search_category_weight = 0.3
-cfg.search_subcategory_weight = 0.5
+# category is the filter key
+cfg.build_category_weight = 1.0
+cfg.search_category_weight = 1.0
 
-cfg.build_attr_weight = 0.2
-cfg.build_category_weight = 0.3
-cfg.build_subcategory_weight = 0.5
+# a large penalty turns a category mismatch into a hard exclusion
+cfg.build_category_penalty = 1e8
+cfg.search_category_penalty = 1e8
+
+# the vectors below are already L2-normalized
+cfg.vector_normalized = True
 
 engine = brinicle.ItemSearchEngine(
     "vector_filter_item_index",
@@ -471,39 +560,104 @@ engine = brinicle.ItemSearchEngine(
 
 engine.init(mode="build")
 
-item_vector = np.random.randn(vector_dim).astype("float32")
+def l2(v):
+    v = np.asarray(v, dtype="float32")
+    return v / np.linalg.norm(v)
 
 engine.ingest(
-    external_id="p1",
+    external_id="chunk-1",
     title="",
-    category="Electronics",
-    subcategory="Smartphones",
-    attributes={"brand": "Apple", "storage": "256GB"},
-    vector=item_vector,
-    normalize=True,
+    category="report_2024.pdf",
+    vector=l2(np.random.randn(vector_dim)),
+)
+
+engine.ingest(
+    external_id="chunk-2",
+    title="",
+    category="manual_v3.pdf",
+    vector=l2(np.random.randn(vector_dim)),
 )
 
 engine.finalize()
 
-query_vector = np.random.randn(vector_dim).astype("float32")
+query_vector = l2(np.random.randn(vector_dim))
 
+# return only items whose category == "report_2024.pdf",
+# ranked by vector similarity within that key
 results = engine.search(
     "",
-    category="Electronics",
-    subcategory="Smartphones",
-    attributes={"brand": "Apple"},
+    category="report_2024.pdf",
     vector=query_vector,
-    normalize=True,
-    threshold=1.0,
+    # above the largest matching vector distance (<= 2.0 for normalized
+    # vectors), and below w_category * category_penalty
+    threshold=2.0,
     k=10,
 )
 
 print(results)
 ```
 
-`threshold` controls how strict the filter behavior is. Tune the parameter weights, penalties, and threshold based on how hard the filters should be. `threshold=3.0` means complete hard-filtering.
-Please note that for consistency, set weights of build, and search in such a way that they sums up to one. For instance, in this example 0.2 + 0.3 + 0.5 = 1.0 and the same thing for build.
-In the background we have 1.0 score for semantic and 1.0 for lexical if weights sums up to 1.0. So, the worst match should have maximum distance 2.0.
+To inspect the distances directly, swap `search(...)` for
+`search_with_distance(...)`: matching items appear at their vector distances and
+non-matching items appear at `>= 1e8`.
+
+---
+
+### Filtering on attributes
+
+`attributes` give an exact filter at search time without any penalty tuning,
+because a value mismatch on a shared key already contributes a large fixed
+penalty:
+
+```python
+cfg.search_attr_weight = 0.1   # any value > 0 lets the mismatch penalty apply
+cfg.build_attr_weight = 0.1
+
+engine.ingest(
+    external_id="chunk-1",
+    title="",
+    attributes={"file": "report_2024.pdf"},
+    vector=l2(np.random.randn(vector_dim)),
+)
+
+results = engine.search(
+    "",
+    attributes={"file": "report_2024.pdf"},
+    vector=query_vector,
+    threshold=2.0,
+    k=10,
+)
+```
+
+Two behaviors to keep in mind:
+
+- An item is excluded only when it **carries the queried key** with a different
+  value. An item that has other attributes but is missing the key is **not**
+  excluded; an item with no attributes at all receives a fixed `0.5` penalty. For
+  reliable attribute filtering, set the key on every ingested item.
+- Because the mismatch penalty is large but finite, keep `threshold` below
+  `w_attr * penalty`, or the attribute filter stops excluding.
+
+---
+
+### Notes
+
+- **Weights do not need to sum to `1.0`.** They are independent multipliers in an
+  additive sum; summing them to `1.0` is only a convention and does not bound the
+  distance.
+- `category_penalty` is shared by both `category` and `subcategory`; there is no
+  separate subcategory penalty.
+- Setting `category`/`subcategory` to an empty value (or omitting it) disables
+  that field: it contributes `0` rather than acting as a filter.
+- `category`, `subcategory`, and attribute keys/values are hashed, so distinct
+  labels can in principle collide. If you rely on a field as a strict key across
+  many distinct values, verify identity downstream (for example, look the
+  returned id up in your own store) for an exact guarantee.
+- Set `vector_normalized = True` when your embeddings are already L2-normalized
+  for the faster dot-product path; leave it `False` to let brinicle handle
+  unnormalized vectors via the general cosine path.
+- Leaving the title empty is sufficient: with `w_title = 0` the title never
+  contributes, regardless of its contents.
 
 ---
 
