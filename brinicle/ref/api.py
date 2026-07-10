@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import Response
 
-from brinicle import VectorEngine
+from brinicle._brinicle import VectorEngine
 from brinicle.ref.io_models import CreateIndexRequest
 from brinicle.ref.io_models import DeleteRequest
 from brinicle.ref.io_models import DeleteResponse
@@ -29,6 +29,8 @@ from brinicle.ref.io_models import SuccessResponse
 
 indexes: Dict[str, VectorEngine] = {}
 store_dir = "/app/data/"
+
+MAX_SEARCH_BATCH_SIZE = 8192
 
 
 @asynccontextmanager
@@ -92,8 +94,10 @@ async def create_index(request: CreateIndexRequest):
                 params.M,
                 params.ef_construction,
                 params.ef_search,
-                params.rng_seed,
+                build_n_threads=params.build_n_threads,
+                seed=params.rng_seed,
             )
+            print(params)
         else:
             engine = VectorEngine(
                 store_dir + request.index_name,
@@ -151,17 +155,20 @@ async def get_index_status(index_name: str):
 @app.post("/indexes/load", response_model=SuccessResponse)
 async def load_index(request: LoadIndexRequest):
     index_name = request.index_name
-    engine = VectorEngine(
-        store_dir + index_name,
-        0,  # means load the dim from the index
-    )
 
+    # if index_name in indexes:
+    #     raise HTTPException(
+    #         status_code=409,
+    #         detail=f"Index '{index_name}' is already loaded",
+    #     )
+
+    engine = VectorEngine(store_dir + index_name, 0)
     indexes[index_name] = engine
 
     return SuccessResponse(
         success=True,
-        message=f"Index '{request.index_name}' created successfully",
-        index_name=request.index_name,
+        message=f"Index '{index_name}' loaded successfully",
+        index_name=index_name,
     )
 
 
@@ -250,7 +257,7 @@ async def ingest_batch(request: Request):
                     offset += id_bytes
 
                     vec_bytes_data = chunk[offset : offset + vec_bytes]
-                    vec_array = np.frombuffer(vec_bytes_data, dtype=np.float32)
+                    vec_array = np.frombuffer(vec_bytes_data, dtype=np.float32).copy()
                     offset += vec_bytes
 
                     engine.ingest(external_id, vec_array)
@@ -350,11 +357,101 @@ async def search_bin(
     efs: int = 64,
     body: bytes = Body(..., media_type="application/octet-stream"),
 ):
-    idx = indexes.get(index_name)
+    engine = get_engine(index_name)
+
+    if k <= 0:
+        raise HTTPException(status_code=400, detail="k must be greater than 0")
+    if efs <= 0:
+        raise HTTPException(status_code=400, detail="efs must be greater than 0")
+
     query = np.frombuffer(body, dtype=np.float32)
-    neighbors = idx.search(query, k=k, efs=efs)
+    if query.size != engine.dim:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Expected one float32 vector with dim={engine.dim}, got {query.size} values",
+        )
+
+    neighbors = engine.search(query, k=k, efs=efs)
     return Response(
         content=orjson.dumps(neighbors, option=orjson.OPT_SERIALIZE_NUMPY),
+        media_type="application/json",
+    )
+
+
+@app.post("/search/batch.bin")
+async def search_batch_bin(
+    index_name: str,
+    k: int = 10,
+    efs: int = 64,
+    n_jobs: int = 1,
+    body: bytes = Body(..., media_type="application/octet-stream"),
+):
+    """Run real VectorEngine batch search over raw float32 query vectors.
+
+    Request body layout:
+      [query_0 float32 dim values][query_1 float32 dim values]...
+
+    Query params:
+      index_name: loaded index name
+      k: top-k result count
+      efs: search ef / query-time search width
+      n_jobs: worker count passed to VectorEngine.search_batch; use -1 for engine default/all
+    """
+
+    engine = get_engine(index_name)
+
+    if k <= 0:
+        raise HTTPException(status_code=400, detail="k must be greater than 0")
+    if efs <= 0:
+        raise HTTPException(status_code=400, detail="efs must be greater than 0")
+    if n_jobs == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="n_jobs must be 1, greater than 1, or -1.",
+        )
+
+    dim = int(engine.dim)
+    if dim <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Index '{index_name}' has invalid dim={dim}",
+        )
+
+    row_bytes = dim * 4
+    if len(body) == 0:
+        raise HTTPException(status_code=400, detail="Empty batch search body")
+    if len(body) % row_bytes != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Batch search payload is not aligned to float32 rows: "
+                f"got {len(body)} bytes, expected a multiple of {row_bytes} bytes "
+                f"for dim={dim}."
+            ),
+        )
+
+    batch_size = len(body) // row_bytes
+    if batch_size > MAX_SEARCH_BATCH_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Batch too large. Max allowed batch size is "
+                f"{MAX_SEARCH_BATCH_SIZE}, got {batch_size}."
+            ),
+        )
+
+    queries = np.frombuffer(body, dtype=np.float32).reshape(batch_size, dim)
+
+    ids_by_query = engine.search_batch(queries, k=k, efs=efs, n_jobs=n_jobs)
+
+    if len(ids_by_query) != batch_size:
+        raise RuntimeError(
+            f"Batch search returned {len(ids_by_query)} result lists "
+            f"for {batch_size} queries."
+        )
+
+    return Response(
+        content=orjson.dumps(ids_by_query, option=orjson.OPT_SERIALIZE_NUMPY),
         media_type="application/json",
     )
 

@@ -204,6 +204,7 @@ struct MMapRegion {
 			throw std::runtime_error("mmap failed: " + std::string(std::strerror(err)));
 		}
 		data = static_cast<uint8_t*>(p);
+		// ::madvise(data, size, MADV_RANDOM);
 	}
 
 };

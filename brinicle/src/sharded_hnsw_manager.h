@@ -164,7 +164,7 @@ public:
 				n_shards_ = 1;
 			}
 
-			if (n_shards_ == 0) {
+			if (n_shards_ < 0) {
 				throw std::invalid_argument("n_shards must be greater than 0");
 			}
 
