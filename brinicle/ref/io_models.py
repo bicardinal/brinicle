@@ -22,6 +22,9 @@ class HNSWParams(BaseModel):
     rng_seed: Optional[int] = Field(
         default=0, description="Random number generator seed"
     )
+    build_n_threads: Optional[int] = Field(
+        default=1, description="Graph build n threads"
+    )
 
 
 class CreateIndexRequest(BaseModel):

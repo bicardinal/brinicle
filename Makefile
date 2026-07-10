@@ -49,9 +49,9 @@ docker-run:
 	  -v ./brinicle_data:/app/data \
 	  -e PYTHONUNBUFFERED=1 \
 	  -e LOG_LEVEL=INFO \
-	  --memory="16gb" \
-	  --memory-swap="16gb" \
-	  --cpus="16"  \
+	  --memory="1gb" \
+	  --memory-swap="1gb" \
+	  --cpus="2"  \
 	  --restart unless-stopped \
 	  $(DOCKER_IMAGE)
 	@echo "Container started. API available at http://localhost:$(PORT)"
@@ -93,7 +93,8 @@ format:
 	black tests
 
 pybuild:
+# 	export CIBW_ENVIRONMENT='PIP_NO_INDEX=1 PIP_FIND_LINKS=/project/local_wheels'
 	cibuildwheel --platform linux
 
 upload-pypi:
-	python3 -m twine upload wheelhouse/*
+	python -m twine upload wheelhouse/* --verbose
