@@ -535,6 +535,475 @@ class PayloadStoreSimpleTests:
         finally:
             self._close_store(store)
 
+
+    def test_empty_new_capabilities(self):
+        path = self._get_test_path("empty_new_capabilities")
+        store = brinicle.PayloadStore().init(
+            path,
+            shard_count=4,
+        )
+
+        try:
+            store.insert_bytes([], [])
+            store.upsert_bytes([], [])
+
+            assert (
+                store.retrieve_bytes([]) == []
+            ), "empty binary retrieval must return an empty list"
+
+            assert (
+                store.exists([]) == []
+            ), "empty existence check must return an empty list"
+
+            scanned_ids, cursor = store.scan(limit=10)
+
+            assert scanned_ids == [], "empty scan must return an empty list"
+            assert cursor is None, "empty scan must not return a cursor"
+
+        finally:
+            self._close_store(store)
+
+    def test_insert_and_retrieve_bytes(self):
+        path = self._get_test_path("insert_bytes")
+        store = brinicle.PayloadStore().init(
+            path,
+            shard_count=8,
+        )
+
+        try:
+            ids = [
+                "binary-empty",
+                "binary-null",
+                "binary-invalid-utf8",
+                "binary-document",
+            ]
+
+            values = [
+                b"",
+                b"\x00\x01\x02\x00",
+                b"\xff\xfe\x80\x81",
+                bytes(range(256)),
+            ]
+
+            store.insert_bytes(ids, values)
+
+            result = store.retrieve_bytes(
+                [
+                    "binary-document",
+                    "missing-binary",
+                    "binary-empty",
+                    "binary-invalid-utf8",
+                    "binary-document",
+                    "binary-null",
+                ]
+            )
+
+            assert result == [
+                bytes(range(256)),
+                None,
+                b"",
+                b"\xff\xfe\x80\x81",
+                bytes(range(256)),
+                b"\x00\x01\x02\x00",
+            ], (
+                "binary retrieval did not preserve bytes, "
+                "ordering, duplicates, or missing values"
+            )
+
+        finally:
+            self._close_store(store)
+
+    def test_upsert_bytes(self):
+        path = self._get_test_path("upsert_bytes")
+        store = brinicle.PayloadStore().init(
+            path,
+            shard_count=4,
+        )
+
+        try:
+            store.insert_bytes(
+                [
+                    "binary-1",
+                    "binary-2",
+                ],
+                [
+                    b"old-value-1",
+                    b"old-value-2",
+                ],
+            )
+
+            store.upsert_bytes(
+                [
+                    "binary-2",
+                    "binary-3",
+                ],
+                [
+                    b"new-value-2",
+                    b"\x00new-value-3\xff",
+                ],
+            )
+
+            result = store.retrieve_bytes(
+                [
+                    "binary-1",
+                    "binary-2",
+                    "binary-3",
+                ]
+            )
+
+            assert result == [
+                b"old-value-1",
+                b"new-value-2",
+                b"\x00new-value-3\xff",
+            ], "binary upsert did not correctly update and insert values"
+
+        finally:
+            self._close_store(store)
+
+    def test_bytes_persistence_after_reopen(self):
+        path = self._get_test_path("bytes_persistence")
+
+        ids = [
+            "persistent-binary-1",
+            "persistent-binary-2",
+        ]
+
+        values = [
+            b"\x00\x10\x20",
+            b"\xffstored\x00payload",
+        ]
+
+        first_store = brinicle.PayloadStore().init(
+            path,
+            shard_count=4,
+        )
+
+        try:
+            first_store.insert_bytes(ids, values)
+
+        finally:
+            self._close_store(first_store)
+
+        second_store = brinicle.PayloadStore().init(
+            path,
+            shard_count=4,
+        )
+
+        try:
+            assert (
+                second_store.retrieve_bytes(ids) == values
+            ), "binary payloads were not preserved after reopening"
+
+            second_store.upsert_bytes(
+                ["persistent-binary-2"],
+                [b"updated-after-reopen"],
+            )
+
+        finally:
+            self._close_store(second_store)
+
+        third_store = brinicle.PayloadStore().init(
+            path,
+            shard_count=4,
+        )
+
+        try:
+            assert third_store.retrieve_bytes(ids) == [
+                b"\x00\x10\x20",
+                b"updated-after-reopen",
+            ], "binary upsert was not preserved after another reopen"
+
+        finally:
+            self._close_store(third_store)
+
+    def test_exists_preserves_order_duplicates_and_missing(self):
+        path = self._get_test_path("exists")
+        store = brinicle.PayloadStore().init(
+            path,
+            shard_count=8,
+        )
+
+        try:
+            store.insert(
+                [
+                    "text-item-1",
+                    "text-item-2",
+                ],
+                [
+                    "value-1",
+                    "value-2",
+                ],
+            )
+
+            store.insert_bytes(
+                ["binary-item-1"],
+                [b"\x00\xff"],
+            )
+
+            result = store.exists(
+                [
+                    "binary-item-1",
+                    "missing-item",
+                    "text-item-2",
+                    "binary-item-1",
+                    "text-item-1",
+                    "missing-item",
+                ]
+            )
+
+            assert result == [
+                True,
+                False,
+                True,
+                True,
+                True,
+                False,
+            ], (
+                "exists did not preserve ordering, duplicates, "
+                "or missing-value behavior"
+            )
+
+            store.delete(["text-item-1"])
+
+            assert store.exists(
+                ["text-item-1", "text-item-2"]
+            ) == [
+                False,
+                True,
+            ], "exists returned stale results after deletion"
+
+        finally:
+            self._close_store(store)
+
+    def test_scan_sorted_prefix_and_pagination(self):
+        path = self._get_test_path("scan")
+        store = brinicle.PayloadStore().init(
+            path,
+            shard_count=16,
+        )
+
+        try:
+            user_ids = [
+                f"user:{index:03d}"
+                for index in range(17)
+            ]
+
+            # Insert in reverse order so scan ordering cannot accidentally
+            # match insertion order.
+            reversed_user_ids = list(reversed(user_ids))
+
+            store.insert(
+                reversed_user_ids,
+                [
+                    f"value-{payload_id}"
+                    for payload_id in reversed_user_ids
+                ],
+            )
+
+            store.insert(
+                [
+                    "book:001",
+                    "book:002",
+                    "question:001",
+                ],
+                [
+                    "book-one",
+                    "book-two",
+                    "question-one",
+                ],
+            )
+
+            collected: list[str] = []
+            cursor = None
+
+            while True:
+                page, cursor = store.scan(
+                    prefix="user:",
+                    cursor=cursor,
+                    limit=4,
+                )
+
+                collected.extend(page)
+
+                if cursor is None:
+                    break
+
+            assert collected == user_ids, (
+                "scan did not return all matching IDs in global "
+                "lexicographic order"
+            )
+
+            all_ids, all_cursor = store.scan(limit=100)
+
+            assert all_ids == sorted(
+                user_ids
+                + [
+                    "book:001",
+                    "book:002",
+                    "question:001",
+                ]
+            ), "unfiltered scan did not return globally sorted IDs"
+
+            assert all_cursor is None, (
+                "scan returned a cursor when all results fit in one page"
+            )
+
+        finally:
+            self._close_store(store)
+
+    def test_scan_treats_prefix_characters_literally(self):
+        path = self._get_test_path("scan_literal_prefix")
+        store = brinicle.PayloadStore().init(
+            path,
+            shard_count=4,
+        )
+
+        try:
+            store.insert(
+                [
+                    "user%:001",
+                    "user_:001",
+                    "userA:001",
+                    "user%:002",
+                ],
+                [
+                    "percent-one",
+                    "underscore",
+                    "letter",
+                    "percent-two",
+                ],
+            )
+
+            percent_ids, percent_cursor = store.scan(
+                prefix="user%:",
+                limit=10,
+            )
+
+            underscore_ids, underscore_cursor = store.scan(
+                prefix="user_:",
+                limit=10,
+            )
+
+            assert percent_ids == [
+                "user%:001",
+                "user%:002",
+            ], "scan treated '%' as a wildcard"
+
+            assert underscore_ids == [
+                "user_:001",
+            ], "scan treated '_' as a wildcard"
+
+            assert percent_cursor is None
+            assert underscore_cursor is None
+
+        finally:
+            self._close_store(store)
+
+    def test_backup_copies_text_and_binary_and_is_independent(self):
+        source_path = self._get_test_path("backup_source")
+        backup_path = self._get_test_path("backup_snapshot")
+
+        source_store = brinicle.PayloadStore().init(
+            source_path,
+            shard_count=4,
+        )
+
+        try:
+            source_store.insert(
+                [
+                    "text-1",
+                    "text-2",
+                ],
+                [
+                    "version-1",
+                    "persistent-text",
+                ],
+            )
+
+            source_store.insert_bytes(
+                ["binary-1"],
+                [b"\x00\x01\xff"],
+            )
+
+            source_store.backup(backup_path)
+
+            # Mutations after backup must not change the snapshot.
+            source_store.upsert(
+                ["text-1"],
+                ["version-2"],
+            )
+            source_store.upsert_bytes(
+                ["binary-1"],
+                [b"changed"],
+            )
+            source_store.delete(["text-2"])
+
+        finally:
+            self._close_store(source_store)
+
+        backup_store = brinicle.PayloadStore().init(
+            backup_path,
+            shard_count=4,
+        )
+
+        try:
+            assert backup_store.retrieve(
+                [
+                    "text-1",
+                    "text-2",
+                ]
+            ) == [
+                "version-1",
+                "persistent-text",
+            ], "backup did not preserve text payloads at snapshot time"
+
+            assert backup_store.retrieve_bytes(
+                ["binary-1"]
+            ) == [
+                b"\x00\x01\xff"
+            ], "backup did not preserve binary payloads at snapshot time"
+
+            scanned_ids, cursor = backup_store.scan(limit=10)
+
+            assert scanned_ids == [
+                "binary-1",
+                "text-1",
+                "text-2",
+            ], "backup did not preserve the complete ID set"
+
+            assert cursor is None
+
+        finally:
+            self._close_store(backup_store)
+
+    def test_backup_rejects_existing_destination(self):
+        source_path = self._get_test_path(
+            "backup_existing_source"
+        )
+        backup_path = self._get_test_path(
+            "backup_existing_destination"
+        )
+
+        os.makedirs(backup_path)
+
+        store = brinicle.PayloadStore().init(
+            source_path,
+            shard_count=2,
+        )
+
+        try:
+            try:
+                store.backup(backup_path)
+            except FileExistsError:
+                pass
+            else:
+                raise AssertionError(
+                    "backup must reject an existing destination"
+                )
+
+        finally:
+            self._close_store(store)
+
     def test_destroy(self):
         path = self._get_test_path("destroy")
         store = brinicle.PayloadStore().init(
