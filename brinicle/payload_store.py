@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Final
 from typing import Iterator
 from typing import Sequence
-
+import heapq
+from itertools import islice
 
 def _shard_index(payload_id: str, shard_count: int) -> int:
     digest = hashlib.blake2b(
@@ -22,6 +23,29 @@ def _shard_index(payload_id: str, shard_count: int) -> int:
 
     return int.from_bytes(digest, byteorder="big") % shard_count
 
+def _prefix_upper_bound(prefix: str) -> str | None:
+    """
+    Return the smallest string greater than every string beginning
+    with `prefix`.
+
+    For example:
+        "user:" -> "user;"
+
+    Returns None only when no Unicode successor can be constructed.
+    """
+    if not prefix:
+        return None
+
+    characters = list(prefix)
+
+    for index in range(len(characters) - 1, -1, -1):
+        code_point = ord(characters[index])
+
+        if code_point < 0x10FFFF:
+            characters[index] = chr(code_point + 1)
+            return "".join(characters[: index + 1])
+
+    return None
 
 _STORE_FORMAT: Final = "brinicle-payload-store"
 _STORE_VERSION: Final = 1
@@ -165,6 +189,55 @@ class _PayloadShard:
                 finally:
                     self._closed = True
 
+    def exists_many(
+        self,
+        ids: Sequence[str],
+    ) -> set[str]:
+        if not ids:
+            return set()
+
+        unique_ids = list(dict.fromkeys(ids))
+
+        with self._lock:
+            self._ensure_open()
+
+            try:
+                self._connection.execute("BEGIN")
+
+                existing_ids: set[str] = set()
+
+                for start in range(
+                    0,
+                    len(unique_ids),
+                    _SQL_PARAMETER_CHUNK_SIZE,
+                ):
+                    chunk = unique_ids[
+                        start : start + _SQL_PARAMETER_CHUNK_SIZE
+                    ]
+                    placeholders = ", ".join("?" for _ in chunk)
+
+                    cursor = self._connection.execute(
+                        f"""
+                        SELECT id
+                        FROM payloads
+                        WHERE id IN ({placeholders})
+                        """,
+                        chunk,
+                    )
+
+                    existing_ids.update(
+                        payload_id
+                        for (payload_id,) in cursor
+                    )
+
+                self._connection.commit()
+                return existing_ids
+
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.rollback()
+                raise
+
     def _configure_connection(self) -> None:
         journal_mode = self._connection.execute("PRAGMA journal_mode = WAL").fetchone()
 
@@ -296,6 +369,132 @@ class _PayloadShard:
             raise RuntimeError(
                 f"Payload shard has no active write transaction: " f"{self._path}"
             )
+
+    def scan_ids(
+        self,
+        *,
+        prefix: str | None,
+        cursor: str | None,
+        limit: int,
+    ) -> list[str]:
+        if limit <= 0:
+            return []
+
+        with self._lock:
+            self._ensure_open()
+
+            conditions: list[str] = []
+            parameters: list[object] = []
+
+            # The cursor is exclusive.
+            if cursor is not None:
+                conditions.append("id > ?")
+                parameters.append(cursor)
+
+            if prefix is not None:
+                upper_bound = _prefix_upper_bound(prefix)
+
+                conditions.append("id >= ?")
+                parameters.append(prefix)
+
+                if upper_bound is not None:
+                    conditions.append("id < ?")
+                    parameters.append(upper_bound)
+                else:
+                    # Extremely rare edge case where every character in the
+                    # prefix is the maximum Unicode code point.
+                    conditions.append("substr(id, 1, ?) = ?")
+                    parameters.extend((len(prefix), prefix))
+
+            query = "SELECT id FROM payloads"
+
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+
+            query += " ORDER BY id LIMIT ?"
+            parameters.append(limit)
+
+            try:
+                self._connection.execute("BEGIN")
+
+                cursor_result = self._connection.execute(
+                    query,
+                    parameters,
+                )
+
+                results = [
+                    payload_id
+                    for (payload_id,) in cursor_result
+                ]
+
+                self._connection.commit()
+                return results
+
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.rollback()
+                raise
+
+
+    def backup_to(
+        self,
+        destination: Path,
+    ) -> None:
+        if destination.exists():
+            raise FileExistsError(
+                f"Backup shard already exists: {destination}"
+            )
+
+        destination.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        with self._lock:
+            self._ensure_open()
+
+            destination_connection: sqlite3.Connection | None = None
+
+            try:
+                destination_connection = sqlite3.connect(
+                    str(destination),
+                    timeout=self._busy_timeout_ms / 1_000,
+                    check_same_thread=False,
+                    isolation_level=None,
+                )
+
+                self._connection.backup(
+                    destination_connection,
+                )
+
+                quick_check = destination_connection.execute(
+                    "PRAGMA quick_check"
+                ).fetchone()
+
+                if (
+                    quick_check is None
+                    or quick_check[0] != "ok"
+                ):
+                    raise RuntimeError(
+                        "Backup shard failed SQLite quick_check: "
+                        f"{destination}"
+                    )
+
+            except BaseException:
+                if destination_connection is not None:
+                    try:
+                        destination_connection.close()
+                    except BaseException:
+                        pass
+
+                    destination_connection = None
+
+                destination.unlink(missing_ok=True)
+                raise
+
+            finally:
+                if destination_connection is not None:
+                    destination_connection.close()
 
 
 class PayloadStore:
@@ -571,6 +770,101 @@ class PayloadStore:
                 for shard in reversed(acquired_shards):
                     shard._release()
 
+    def exists(
+        self,
+        ids: Sequence[str],
+    ) -> list[bool]:
+        self._validate_ids(ids)
+
+        with self._operation():
+            if not ids:
+                return []
+
+            ids_by_shard = self._group_ids_by_shard(ids)
+            shard_indices = sorted(ids_by_shard)
+
+            acquired_shards: list[_PayloadShard] = []
+            existing_ids: set[str] = set()
+
+            try:
+                for shard_index in shard_indices:
+                    shard = self._shards[shard_index]
+                    shard._acquire()
+                    acquired_shards.append(shard)
+
+                for shard_index in shard_indices:
+                    shard_existing_ids = (
+                        self._shards[shard_index].exists_many(
+                            ids_by_shard[shard_index]
+                        )
+                    )
+                    existing_ids.update(shard_existing_ids)
+
+            finally:
+                for shard in reversed(acquired_shards):
+                    shard._release()
+
+            return [
+                payload_id in existing_ids
+                for payload_id in ids
+            ]
+
+    def scan(
+        self,
+        *,
+        prefix: str | None = None,
+        cursor: str | None = None,
+        limit: int = 1_000,
+    ) -> tuple[list[str], str | None]:
+        self._validate_scan_inputs(
+            prefix=prefix,
+            cursor=cursor,
+            limit=limit,
+        )
+
+        with self._operation():
+
+            per_shard_limit = limit + 1
+            acquired_shards: list[_PayloadShard] = []
+
+            try:
+                for shard in self._shards:
+                    shard._acquire()
+                    acquired_shards.append(shard)
+
+                shard_results = [
+                    shard.scan_ids(
+                        prefix=prefix,
+                        cursor=cursor,
+                        limit=per_shard_limit,
+                    )
+                    for shard in self._shards
+                ]
+
+                merged = heapq.merge(*shard_results)
+
+                page_with_sentinel = list(
+                    islice(
+                        merged,
+                        limit + 1,
+                    )
+                )
+
+            finally:
+                for shard in reversed(acquired_shards):
+                    shard._release()
+
+            has_more = len(page_with_sentinel) > limit
+            page = page_with_sentinel[:limit]
+
+            next_cursor = (
+                page[-1]
+                if has_more and page
+                else None
+            )
+
+            return page, next_cursor
+
     def retrieve(
         self,
         ids: Sequence[str],
@@ -631,6 +925,293 @@ class PayloadStore:
                 self._closed = True
                 self._closing = False
                 self._state_condition.notify_all()
+    
+    def insert_bytes(
+        self,
+        ids: Sequence[str],
+        values: Sequence[bytes],
+    ) -> None:
+        self._validate_bytes_write_inputs(ids, values)
+
+        with self._operation():
+            if not ids:
+                return
+
+            records_by_shard = self._group_byte_records_by_shard(
+                ids,
+                values,
+            )
+            shard_indices = sorted(records_by_shard)
+            acquired_shards: list[_PayloadShard] = []
+
+            try:
+                for shard_index in shard_indices:
+                    shard = self._shards[shard_index]
+                    shard._acquire()
+                    acquired_shards.append(shard)
+
+                for shard in acquired_shards:
+                    shard._begin_write()
+
+                for shard_index in shard_indices:
+                    self._shards[shard_index]._insert_many_uncommitted(
+                        records_by_shard[shard_index]
+                    )
+
+                for shard in acquired_shards:
+                    shard._commit()
+
+            except BaseException:
+                for shard in reversed(acquired_shards):
+                    try:
+                        shard._rollback()
+                    except BaseException:
+                        pass
+                raise
+
+            finally:
+                for shard in reversed(acquired_shards):
+                    shard._release()
+
+    def upsert_bytes(
+        self,
+        ids: Sequence[str],
+        values: Sequence[bytes],
+    ) -> None:
+        self._validate_bytes_write_inputs(ids, values)
+
+        with self._operation():
+            if not ids:
+                return
+
+            records_by_shard = self._group_byte_records_by_shard(
+                ids,
+                values,
+            )
+            shard_indices = sorted(records_by_shard)
+            acquired_shards: list[_PayloadShard] = []
+
+            try:
+                for shard_index in shard_indices:
+                    shard = self._shards[shard_index]
+                    shard._acquire()
+                    acquired_shards.append(shard)
+
+                for shard in acquired_shards:
+                    shard._begin_write()
+
+                for shard_index in shard_indices:
+                    self._shards[shard_index]._upsert_many_uncommitted(
+                        records_by_shard[shard_index]
+                    )
+
+                for shard in acquired_shards:
+                    shard._commit()
+
+            except BaseException:
+                for shard in reversed(acquired_shards):
+                    try:
+                        shard._rollback()
+                    except BaseException:
+                        pass
+                raise
+
+            finally:
+                for shard in reversed(acquired_shards):
+                    shard._release()
+
+    def retrieve_bytes(
+        self,
+        ids: Sequence[str],
+    ) -> list[bytes | None]:
+        self._validate_ids(ids)
+
+        with self._operation():
+            if not ids:
+                return []
+
+            ids_by_shard = self._group_ids_by_shard(ids)
+            shard_indices = sorted(ids_by_shard)
+            acquired_shards: list[_PayloadShard] = []
+            payloads_by_id: dict[str, bytes] = {}
+
+            try:
+                for shard_index in shard_indices:
+                    shard = self._shards[shard_index]
+                    shard._acquire()
+                    acquired_shards.append(shard)
+
+                for shard_index in shard_indices:
+                    shard_payloads = self._shards[shard_index].retrieve_many(
+                        ids_by_shard[shard_index]
+                    )
+
+                    for payload_id, payload in shard_payloads.items():
+                        payloads_by_id[payload_id] = payload
+
+            finally:
+                for shard in reversed(acquired_shards):
+                    shard._release()
+
+            return [
+                payloads_by_id.get(payload_id)
+                for payload_id in ids
+            ]
+
+    def backup(
+        self,
+        destination: str | Path,
+    ) -> None:
+        """
+        Create a consistent backup of the payload store.
+
+        The backup contains:
+
+        - manifest.json
+        - all SQLite shard files
+
+        The destination must not already exist.
+
+        Consistency is guaranteed against operations performed through
+        this PayloadStore instance. Multiple independent processes require
+        an additional inter-process store lock.
+        """
+        if not isinstance(destination, (str, Path)):
+            raise TypeError(
+                "destination must be a string or pathlib.Path"
+            )
+
+        if (
+            isinstance(destination, str)
+            and not destination.strip()
+        ):
+            raise ValueError(
+                "destination cannot be empty"
+            )
+
+        destination_path = (
+            Path(destination)
+            .expanduser()
+            .absolute()
+        )
+
+        with self._operation():
+            if self._path is None:
+                raise RuntimeError(
+                    "Payload store path is unavailable"
+                )
+
+            if self._manifest_path is None:
+                raise RuntimeError(
+                    "Payload store manifest path is unavailable"
+                )
+
+            source_path = self._path.resolve()
+            resolved_destination = destination_path.resolve(
+                strict=False
+            )
+
+            if resolved_destination == source_path:
+                raise ValueError(
+                    "Backup destination cannot be the "
+                    "payload store itself"
+                )
+
+            try:
+                resolved_destination.relative_to(source_path)
+            except ValueError:
+                pass
+            else:
+                raise ValueError(
+                    "Backup destination cannot be inside "
+                    "the payload store directory"
+                )
+
+            if destination_path.exists():
+                raise FileExistsError(
+                    f"Backup destination already exists: "
+                    f"{destination_path}"
+                )
+
+            if destination_path.is_symlink():
+                raise RuntimeError(
+                    "Backup destination cannot be a symbolic link: "
+                    f"{destination_path}"
+                )
+
+            destination_parent = destination_path.parent
+
+            destination_parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            if not destination_parent.is_dir():
+                raise RuntimeError(
+                    "Backup destination parent is not a directory: "
+                    f"{destination_parent}"
+                )
+
+            temporary_path = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{destination_path.name}.",
+                    suffix=".backup.tmp",
+                    dir=destination_parent,
+                )
+            )
+
+            acquired_shards: list[_PayloadShard] = []
+
+            try:
+                # Acquire every shard lock before backing up the first
+                # shard. This prevents writes through this store instance
+                # from occurring between shard snapshots.
+                for shard in self._shards:
+                    shard._acquire()
+                    acquired_shards.append(shard)
+
+                for shard_index, shard in enumerate(self._shards):
+                    backup_shard_path = (
+                        temporary_path
+                        / _SHARD_FILENAME_TEMPLATE.format(
+                            index=shard_index
+                        )
+                    )
+
+                    shard.backup_to(
+                        backup_shard_path
+                    )
+
+                # Write the manifest last. A temporary backup without a
+                # manifest is never recognized as a complete store.
+                shutil.copyfile(
+                    self._manifest_path,
+                    temporary_path / _MANIFEST_FILENAME,
+                )
+
+                # Recheck immediately before publishing the backup.
+                if destination_path.exists():
+                    raise FileExistsError(
+                        "Backup destination appeared while the "
+                        "backup was being created: "
+                        f"{destination_path}"
+                    )
+
+                temporary_path.rename(
+                    destination_path
+                )
+
+            except BaseException:
+                if temporary_path.exists():
+                    shutil.rmtree(
+                        temporary_path,
+                        ignore_errors=True,
+                    )
+                raise
+
+            finally:
+                for shard in reversed(acquired_shards):
+                    shard._release()
 
     def destroy(self) -> None:
         with self._state_condition:
@@ -699,6 +1280,62 @@ class PayloadStore:
 
         if first_error is not None:
             raise first_error
+
+    def _group_byte_records_by_shard(
+        self,
+        ids: Sequence[str],
+        values: Sequence[bytes],
+    ) -> dict[int, list[tuple[str, bytes]]]:
+        grouped: dict[int, list[tuple[str, bytes]]] = {}
+
+        for payload_id, value in zip(ids, values):
+            shard_index = self._shard_index(payload_id)
+
+            grouped.setdefault(
+                shard_index,
+                [],
+            ).append((payload_id, value))
+
+        return grouped
+
+
+    def _validate_bytes_write_inputs(
+        self,
+        ids: Sequence[str],
+        values: Sequence[bytes],
+    ) -> None:
+        self._validate_ids(ids)
+        if isinstance(values, (str, bytes, bytearray, memoryview)):
+            raise TypeError(
+                "values must be a sequence of bytes objects, "
+                "not a single bytes-like object"
+            )
+
+        if len(ids) != len(values):
+            raise ValueError(
+                "ids and values must have the same length: "
+                f"ids={len(ids)}, values={len(values)}"
+            )
+
+        seen_ids: dict[str, int] = {}
+
+        for index, payload_id in enumerate(ids):
+            previous_index = seen_ids.get(payload_id)
+
+            if previous_index is not None:
+                raise ValueError(
+                    f"Duplicate payload ID {payload_id!r} at "
+                    f"indices {previous_index} and {index}"
+                )
+
+            seen_ids[payload_id] = index
+
+        for index, value in enumerate(values):
+            if not isinstance(value, bytes):
+                raise TypeError(
+                    f"values[{index}] must be bytes, "
+                    f"got {type(value).__name__}"
+                )
 
     def _validate_store_before_destroy(self) -> None:
         if self._path is None or self._manifest_path is None:
@@ -1127,3 +1764,41 @@ class PayloadStore:
 
         if self._shard_count <= 0 or len(self._shards) != self._shard_count:
             raise RuntimeError("Payload store is not fully initialized")
+
+    def _validate_scan_inputs(
+        self,
+        *,
+        prefix: str | None,
+        cursor: str | None,
+        limit: int,
+    ) -> None:
+        if prefix is not None and not isinstance(prefix, str):
+            raise TypeError(
+                "prefix must be a string or None, "
+                f"got {type(prefix).__name__}"
+            )
+
+        if cursor is not None:
+            if not isinstance(cursor, str):
+                raise TypeError(
+                    "cursor must be a string or None, "
+                    f"got {type(cursor).__name__}"
+                )
+
+            if not cursor:
+                raise ValueError(
+                    "cursor cannot be empty"
+                )
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+        ):
+            raise TypeError(
+                "limit must be an integer"
+            )
+
+        if limit <= 0:
+            raise ValueError(
+                "limit must be greater than zero"
+            )
