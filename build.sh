@@ -9,7 +9,9 @@ PYINCLUDE=$(python3.14 -m pybind11 --includes)
 PYEXT=$(python3.14-config --extension-suffix)
 PYLDFLAGS=$(python3.14-config --ldflags)
 
-CXXFLAGS="-Ofast -DNDEBUG -std=c++20 -fPIC -march=native -funroll-loops -mfma"
+# -Ofast implies -ffast-math, which lets the compiler drop the std::isfinite NaN
+# check in ingest. Wheels are built with -O3 via CMake; match that here.
+CXXFLAGS="-O3 -DNDEBUG -std=c++20 -fPIC -march=native -funroll-loops -mfma"
 # CXXFLAGS="-DNDEBUG -std=c++20 -fPIC -march=native -funroll-loops -mfma"
 [[ "$LTO" == "yes" ]] && CXXFLAGS+=" -flto" && PYLDFLAGS+=" -flto"
 

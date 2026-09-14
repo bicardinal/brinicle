@@ -57,14 +57,16 @@ class VectorEngineIrrationalTests:
             self.teardown()
 
     def test_empty_index_search(self):
+        # An engine with no built index is not an error state: search,
+        # batch search and search_with_distance all return empty results.
         db = self.VectorEngine(self._get_test_path("empty"), dim=128)
         query = np.random.randn(128).astype(np.float32)
 
-        try:
-            results = db.search(query, k=10)
-            assert False, "Should have raised error on empty index"
-        except RuntimeError as e:
-            pass
+        assert not db.has_index
+        assert db.search(query, k=10) == []
+        assert db.search_with_distance(query, k=10) == []
+        batch = db.search_batch(query.reshape(2, 64).repeat(2, axis=1), k=10)
+        assert batch == [[], []], batch
 
     def test_dimension_zero(self):
         try:

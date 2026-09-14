@@ -5,6 +5,8 @@ from .autocomplete_search import AutocompleteEngine
 from .item_search import ItemSearchEngine
 from .lexical_encoder import LexicalEncoder
 from .lexical_encoder import _fnv1a_32
+from .lexical_encoder import clear_tokenizer_cache
+from .lexical_encoder import get_cached_tokenizer
 from .payload_store import PayloadStore
 
 __all__ = [
@@ -15,5 +17,7 @@ __all__ = [
     "AutocompleteConfig",
     "LexicalEncoder",
     "_fnv1a_32",
+    "get_cached_tokenizer",
+    "clear_tokenizer_cache",
     "PayloadStore",
 ]

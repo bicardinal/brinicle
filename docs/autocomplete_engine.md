@@ -63,6 +63,13 @@ ac = brinicle.AutocompleteEngine(
 | `autocomplete_config` | Optional autocomplete scoring configuration         |
 | `n_shards`            | Number of local shards used when building the index |
 
+Tokenizers are parsed once per process and shared by every engine and
+`LexicalEncoder` that uses the same path (or the bundled tokenizer). Opening
+many engines is therefore cheap. If you replace a custom tokenizer file on
+disk while the process is running, call `brinicle.clear_tokenizer_cache()`
+before creating the next engine.
+
+
 Example:
 
 ```python

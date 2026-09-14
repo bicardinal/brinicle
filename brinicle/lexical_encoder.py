@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from importlib.resources import as_file
+import threading
 from importlib.resources import files
+from pathlib import Path
 from typing import Any
 from typing import Dict
 from typing import List
@@ -9,6 +10,99 @@ from typing import Optional
 
 import numpy as np
 from tokenizers import Tokenizer
+
+_BUNDLED_TOKENIZER_KEY = "<bundled>"
+_BUNDLED_TOKENIZER_RESOURCE = "tokenizer.json"
+
+# entry: (tokenizer, special_ids, vocab_size)
+_tokenizer_cache: Dict[str, tuple[Tokenizer, frozenset[int], int]] = {}
+_tokenizer_cache_lock = threading.Lock()
+
+
+def _tokenizer_cache_key(tokenizer_path: Optional[str | Path]) -> str:
+    if tokenizer_path in (None, ""):
+        return _BUNDLED_TOKENIZER_KEY
+    return str(Path(tokenizer_path).expanduser().resolve())
+
+
+def _load_tokenizer_uncached(cache_key: str) -> Tokenizer:
+    if cache_key == _BUNDLED_TOKENIZER_KEY:
+        # Read the packaged resource directly instead of materializing it
+        # to a (possibly temporary) file path. This works for zipped
+        # packages and avoids the file-based loader's extra I/O.
+        data = files("brinicle").joinpath(_BUNDLED_TOKENIZER_RESOURCE).read_text(
+            encoding="utf-8"
+        )
+        return Tokenizer.from_str(data)
+    return Tokenizer.from_file(cache_key)
+
+
+def get_cached_tokenizer(
+    tokenizer_path: Optional[str | Path] = None,
+    special_token_names: tuple[str, ...] = (),
+) -> tuple[Tokenizer, frozenset[int]]:
+    """
+    Return a process-wide shared ``Tokenizer`` and the set of ids of the
+    given special tokens.
+
+    Parsing a tokenizer JSON is expensive (tens of milliseconds for the
+    bundled vocabulary) and is done under the GIL, so every engine
+    construction paid for it. The same ``Tokenizer`` object is safe to
+    share across threads for encoding, so it is loaded once per resolved
+    path (or once for the bundled resource) and reused.
+
+    A custom tokenizer file that changes on disk after it was first loaded
+    is not re-read. Call ``clear_tokenizer_cache()`` to force a reload.
+    """
+    tokenizer, special_ids, _ = _get_cached_tokenizer_entry(
+        tokenizer_path, special_token_names
+    )
+    return tokenizer, special_ids
+
+
+def _get_cached_tokenizer_entry(
+    tokenizer_path: Optional[str | Path],
+    special_token_names: tuple[str, ...],
+) -> tuple[Tokenizer, frozenset[int], int]:
+    cache_key = _tokenizer_cache_key(tokenizer_path)
+    names = tuple(special_token_names)
+    entry_key = "\x00".join((cache_key,) + names)
+
+    with _tokenizer_cache_lock:
+        entry = _tokenizer_cache.get(entry_key)
+        if entry is not None:
+            return entry
+
+        # Share the Tokenizer object across differing special-token sets.
+        tokenizer = None
+        vocab_size = None
+        for key, (tok, _, vs) in _tokenizer_cache.items():
+            if key.split("\x00", 1)[0] == cache_key:
+                tokenizer, vocab_size = tok, vs
+                break
+
+        if tokenizer is None:
+            tokenizer = _load_tokenizer_uncached(cache_key)
+            # get_vocab_size(with_added_tokens=True) materializes the whole
+            # vocabulary dict on every call (~8 ms for the bundled file), so
+            # it is computed once here.
+            vocab_size = int(tokenizer.get_vocab_size())
+
+        special_ids = frozenset(
+            int(tok_id)
+            for tok in names
+            if (tok_id := tokenizer.token_to_id(tok)) is not None
+        )
+
+        entry = (tokenizer, special_ids, vocab_size)
+        _tokenizer_cache[entry_key] = entry
+        return entry
+
+
+def clear_tokenizer_cache() -> None:
+    """Drop all cached tokenizers. Subsequent encoders reload from disk."""
+    with _tokenizer_cache_lock:
+        _tokenizer_cache.clear()
 
 
 def _fnv1a_32(ids: List[int]) -> int:
@@ -71,9 +165,8 @@ class LexicalEncoder:
     ):
         if not (0.0 < title_ratio <= 1.0):
             raise ValueError("title_ratio must be in (0, 1]")
+        # _load_tokenizer also sets self.vocab_size from the cache.
         self.tokenizer, self.special_ids = self._load_tokenizer(tokenizer_path)
-
-        self.vocab_size = self.tokenizer.get_vocab_size()
 
         if text_prep is None:
             self.text_prep = TextPreprocess()
@@ -102,24 +195,12 @@ class LexicalEncoder:
         self,
         tokenizer_path: Optional[str | Path] = None,
     ) -> tuple[Tokenizer, set[int]]:
-
-        def _collect_special_ids(tokenizer: Tokenizer) -> set[int]:
-            return {
-                int(tok_id)
-                for tok in self.special_token_names
-                if (tok_id := tokenizer.token_to_id(tok)) is not None
-            }
-
-        if tokenizer_path not in (None, ""):
-            tokenizer = Tokenizer.from_file(str(tokenizer_path))
-            return tokenizer, _collect_special_ids(tokenizer)
-
-        resource = files("brinicle").joinpath("tokenizer.json")
-
-        with as_file(resource) as tokenizer_file:
-            tokenizer = Tokenizer.from_file(str(tokenizer_file))
-
-        return tokenizer, _collect_special_ids(tokenizer)
+        tokenizer, special_ids, vocab_size = _get_cached_tokenizer_entry(
+            tokenizer_path,
+            self.special_token_names,
+        )
+        self.vocab_size = vocab_size
+        return tokenizer, set(special_ids)
 
     def _convert_num(self, the_num: int | float):
         the_num += self.vocab_size + len(self.reserved_tokens)
