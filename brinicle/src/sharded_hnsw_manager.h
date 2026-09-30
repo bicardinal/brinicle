@@ -8,6 +8,8 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -289,9 +291,26 @@ public:
 			throw std::runtime_error("finalize: no pending ingest");
 		}
 
+		std::unique_lock<std::shared_mutex> state(state_mu_);
 		CombinedLock lock(global_lock_path_);
 
 		try {
+			// Insert and upsert need a built index. A built index may still
+			// have shards nothing was routed to; those build their first
+			// segment here, but an index never built at all is refused.
+			if (pending_mode_ != "build") {
+				bool any_index = false;
+				for (const auto& shard : shards_) {
+					any_index = any_index || shard->has_index();
+				}
+				if (!any_index) {
+					for (std::size_t i = 0; i < n_shards_; ++i) {
+						if (shard_pending_[i]) shards_[i]->close();
+					}
+					throw std::runtime_error("No index loaded. Build first.");
+				}
+			}
+
 			for (std::size_t i = 0; i < n_shards_; ++i) {
 				if (shard_pending_[i]) {
 					shards_[i]->finalize(build_params, optimize);
@@ -370,6 +389,8 @@ public:
 		if (!q || k <= 0) {
 			return {};
 		}
+
+		auto state = read_lock_();
 
 		struct Candidate {
 			float distance;
@@ -599,6 +620,8 @@ public:
 			return {};
 		}
 
+		auto state = read_lock_();
+
 		struct Candidate {
 			float distance;
 			uint32_t internal_id;
@@ -824,6 +847,8 @@ public:
 			return out;
 		}
 
+		auto state = read_lock_();
+
 		struct Candidate {
 			float distance;
 			uint32_t internal_id;
@@ -1041,6 +1066,7 @@ public:
 			return 0;
 		}
 
+		std::unique_lock<std::shared_mutex> state(state_mu_);
 		CombinedLock lock(global_lock_path_);
 
 		std::vector<std::vector<std::string>> grouped(n_shards_);
@@ -1108,6 +1134,7 @@ public:
 	}
 
 	void rebuild_compact(ghnsw::Params build_params = {}) {
+		std::unique_lock<std::shared_mutex> state(state_mu_);
 		CombinedLock lock(global_lock_path_);
 
 		for (auto& shard : shards_) {
@@ -1141,7 +1168,9 @@ public:
 		manifest_mtime_ = file_mtime(manifest_path_);
 	}
 
-	bool needs_rebuild() noexcept {
+	bool needs_rebuild() {
+		// Exclusive: a shard reloads changed segments while answering.
+		std::unique_lock<std::shared_mutex> state(state_mu_);
 		for (auto& shard : shards_) {
 			if (shard->has_index() && shard->needs_rebuild()) {
 				return true;
@@ -1151,6 +1180,7 @@ public:
 	}
 
 	void optimize_graph() {
+		std::unique_lock<std::shared_mutex> state(state_mu_);
 		CombinedLock lock(global_lock_path_);
 
 		bool touched = false;
@@ -1190,22 +1220,13 @@ public:
 	}
 
 	void close() {
-		for (auto& shard : shards_) {
-			if (shard) {
-				shard->close();
-			}
-		}
-
-		pending_ = false;
-		pending_mode_.clear();
-
-		if (!shard_pending_.empty()) {
-			std::fill(shard_pending_.begin(), shard_pending_.end(), false);
-		}
+		std::unique_lock<std::shared_mutex> state(state_mu_);
+		close_unlocked_();
 	}
 
 	void destroy() {
-		close();
+		std::unique_lock<std::shared_mutex> state(state_mu_);
+		close_unlocked_();
 
 		CombinedLock lock(global_lock_path_);
 
@@ -1219,7 +1240,8 @@ public:
 		unlink_noexcept(global_lock_path_);
 	}
 
-	bool has_index() const noexcept {
+	bool has_index() const {
+		std::shared_lock<std::shared_mutex> state(state_mu_);
 		for (const auto& shard : shards_) {
 			if (shard && shard->has_index()) {
 				return true;
@@ -1240,7 +1262,8 @@ public:
 		return generation_;
 	}
 
-	std::size_t main_size() const noexcept {
+	std::size_t main_size() const {
+		std::shared_lock<std::shared_mutex> state(state_mu_);
 		std::size_t total = 0;
 		for (const auto& shard : shards_) {
 			if (shard) total += shard->main_size();
@@ -1248,7 +1271,8 @@ public:
 		return total;
 	}
 
-	std::size_t delta_size() const noexcept {
+	std::size_t delta_size() const {
+		std::shared_lock<std::shared_mutex> state(state_mu_);
 		std::size_t total = 0;
 		for (const auto& shard : shards_) {
 			if (shard) total += shard->delta_size();
@@ -1257,6 +1281,49 @@ public:
 	}
 
 private:
+	// Searches hold state_mu_ shared; whatever swaps, rewrites or reloads a
+	// shard's segments holds it exclusively, so a search never reads a
+	// segment another thread is replacing. Before searching, shards whose
+	// files another engine instance or process changed are reloaded, so
+	// separate instances over one path see each other's writes.
+	std::shared_lock<std::shared_mutex> read_lock_() {
+		{
+			std::shared_lock<std::shared_mutex> state(state_mu_);
+			bool stale = false;
+			for (const auto& shard : shards_) {
+				if (shard->stale()) {
+					stale = true;
+					break;
+				}
+			}
+			if (!stale) {
+				return state;
+			}
+		}
+		{
+			std::unique_lock<std::shared_mutex> state(state_mu_);
+			for (auto& shard : shards_) {
+				shard->check_and_reload_if_needed();
+			}
+		}
+		return std::shared_lock<std::shared_mutex>(state_mu_);
+	}
+
+	void close_unlocked_() {
+		for (auto& shard : shards_) {
+			if (shard) {
+				shard->close();
+			}
+		}
+
+		pending_ = false;
+		pending_mode_.clear();
+
+		if (!shard_pending_.empty()) {
+			std::fill(shard_pending_.begin(), shard_pending_.end(), false);
+		}
+	}
+
 	static uint64_t fnv1a64(const std::string& s) noexcept {
 		uint64_t h = 14695981039346656037ull;
 
@@ -1284,6 +1351,7 @@ private:
 
 	uint64_t generation_ = 0;
 	time_t manifest_mtime_ = 0;
+	mutable std::shared_mutex state_mu_;
 	bool auto_reload_manifest_ = false;
 
 	std::vector<std::unique_ptr<VectorEngine>> shards_;

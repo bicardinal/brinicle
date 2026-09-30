@@ -37,6 +37,31 @@ static inline time_t file_mtime(const std::string& p) {
 	return 0;
 }
 
+// One version of a segment file. Whole-second mtimes miss a second write in the
+// same second, and a rename swaps the inode, so all of these are compared.
+struct FileStamp {
+	dev_t dev = 0;
+	ino_t ino = 0;
+	off_t size = 0;
+	long long mtime_ns = 0;
+
+	bool operator==(const FileStamp&) const = default;
+};
+
+static inline FileStamp file_stamp(const std::string& p) {
+	struct stat st{};
+	if (::stat(p.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+		return {};
+	}
+#ifdef __APPLE__
+	const auto& mt = st.st_mtimespec;
+#else
+	const auto& mt = st.st_mtim;
+#endif
+	return {st.st_dev, st.st_ino, st.st_size,
+		static_cast<long long>(mt.tv_sec) * 1000000000LL + mt.tv_nsec};
+}
+
 static inline std::string unique_temp_file(const std::string& base_path, 
 										  const std::string& suffix = ".tmp") {
 	const auto now = std::chrono::high_resolution_clock::now()
@@ -296,7 +321,7 @@ public:
 		if (file_exists(main_path_)) {
 			main_idx_.reset(new ghnsw::Index(main_path_, params_.ef_search, dist_func_));
 			main_size_ = main_idx_->active_size();
-			main_mtime_ = file_mtime(main_path_);
+			main_stamp_ = file_stamp(main_path_);
 			dim_ = main_idx_->dim();
 			iexists = true;
 		}
@@ -306,7 +331,7 @@ public:
 		if (file_exists(delta_path_)) {
 			delta_idx_.reset(new ghnsw::Index(delta_path_, params_.ef_search, dist_func_));
 			delta_size_ = delta_idx_->active_size();
-			delta_mtime_ = file_mtime(delta_path_);
+			delta_stamp_ = file_stamp(delta_path_);
 		}
 	}
 
@@ -493,7 +518,13 @@ public:
 	{
 		CombinedLock lock(lock_path_);
 		force_reload_indices();
-		ensure_has_any_index();
+
+		// A shard nothing was routed to yet has no segment, and holds none of
+		// these ids.
+		if (!has_index()) {
+			if (not_found) *not_found = ids;
+			return 0;
+		}
 
 		std::size_t deleted = 0;
 		std::vector<std::string> local_not_found;
@@ -578,9 +609,13 @@ public:
 		try {
 			if (pending_mode_ == PendingMode::Build) {
 				build_from_scratch(build_params, tmp_prefix_base);
+			} else if (!has_index()) {
+				// Insert or upsert into a shard of a built index that received
+				// nothing so far. There is nothing to delete or merge with;
+				// build its first segment. (ShardedVectorEngine refuses these
+				// modes on an index that was never built.)
+				build_from_scratch(build_params, tmp_prefix_base);
 			} else if (pending_mode_ == PendingMode::Insert) {
-				ensure_has_any_index();
-
 				if (!optimize) {
 					absorb_into_delta(build_params, tmp_prefix_base);
 				} else {
@@ -594,8 +629,6 @@ public:
 					}
 				}
 			} else if (pending_mode_ == PendingMode::Upsert) {
-				ensure_has_any_index();
-
 				std::vector<std::string> ids_to_delete = writer_.ids();
 				auto counts = delete_external_ids_internal(ids_to_delete);
 				// you know, cases like deleting all main elements.
@@ -785,8 +818,8 @@ public:
 		delta_idx_.reset();
 		main_size_ = 0;
 		delta_size_ = 0;
-		main_mtime_ = 0;
-		delta_mtime_ = 0;
+		main_stamp_ = {};
+		delta_stamp_ = {};
 		writer_.close();
 		if (!pending_vec_path_.empty()) {
 			unlink_noexcept(pending_vec_path_);
@@ -811,7 +844,7 @@ private:
 			atomic_rename(delta_path_, main_path_);
 			delta_idx_.reset();
 			delta_size_ = 0;
-			delta_mtime_ = 0;
+			delta_stamp_ = {};
 			force_reload_indices();
 		}
 	}
@@ -830,34 +863,37 @@ private:
 	}
 
 
-	void check_and_reload_if_needed() {
-		// check modification times
-		time_t current_main_mtime = file_exists(main_path_) ? file_mtime(main_path_) : 0;
-		time_t current_delta_mtime = file_exists(delta_path_) ? file_mtime(delta_path_) : 0;
+	// Whether another engine instance or process changed a segment file since
+	// this one loaded it.
+	bool stale() const {
+		return file_stamp(main_path_) != main_stamp_
+			|| file_stamp(delta_path_) != delta_stamp_;
+	}
 
-		// reload if files changed
-		if (current_main_mtime != main_mtime_) {
-			if (current_main_mtime > 0) {
+	void check_and_reload_if_needed() {
+		const FileStamp current_main = file_stamp(main_path_);
+		const FileStamp current_delta = file_stamp(delta_path_);
+
+		if (current_main != main_stamp_) {
+			if (current_main.ino != 0) {
 				main_idx_.reset(new ghnsw::Index(main_path_, params_.ef_search, dist_func_));
 				main_size_ = main_idx_->active_size();
-				main_mtime_ = current_main_mtime;
 			} else {
 				main_idx_.reset();
 				main_size_ = 0;
-				main_mtime_ = 0;
 			}
+			main_stamp_ = current_main;
 		}
 
-		if (current_delta_mtime != delta_mtime_) {
-			if (current_delta_mtime > 0) {
+		if (current_delta != delta_stamp_) {
+			if (current_delta.ino != 0) {
 				delta_idx_.reset(new ghnsw::Index(delta_path_, params_.ef_search, dist_func_));
 				delta_size_ = delta_idx_->active_size();
-				delta_mtime_ = current_delta_mtime;
 			} else {
 				delta_idx_.reset();
 				delta_size_ = 0;
-				delta_mtime_ = 0;
 			}
+			delta_stamp_ = current_delta;
 		}
 	}
 
@@ -866,26 +902,26 @@ private:
 		if (file_exists(main_path_)) {
 			main_idx_.reset(new ghnsw::Index(main_path_, params_.ef_search, dist_func_));
 			main_size_ = main_idx_->active_size();
-			main_mtime_ = file_mtime(main_path_);
+			main_stamp_ = file_stamp(main_path_);
 		} else {
 			main_idx_.reset();
 			main_size_ = 0;
-			main_mtime_ = 0;
+			main_stamp_ = {};
 		}
 		if (file_exists(delta_path_)) {
 			delta_idx_.reset(new ghnsw::Index(delta_path_, params_.ef_search, dist_func_));
 			delta_size_ = delta_idx_->active_size();
-			delta_mtime_ = file_mtime(delta_path_);
+			delta_stamp_ = file_stamp(delta_path_);
 		} else {
 			delta_idx_.reset();
 			delta_size_ = 0;
-			delta_mtime_ = 0;
+			delta_stamp_ = {};
 		}
 	}
 
 	void update_mtimes() {
-		main_mtime_ = file_exists(main_path_) ? file_mtime(main_path_) : 0;
-		delta_mtime_ = file_exists(delta_path_) ? file_mtime(delta_path_) : 0;
+		main_stamp_ = file_stamp(main_path_);
+		delta_stamp_ = file_stamp(delta_path_);
 	}
 
 	std::string default_tmp_prefix_base_() const {
@@ -1109,9 +1145,9 @@ private:
 	std::size_t main_size_ = 0;
 	std::size_t delta_size_ = 0;
 
-	// modification times for lazy reload
-	time_t main_mtime_ = 0;
-	time_t delta_mtime_ = 0;
+	// segment file versions loaded, for lazy reload
+	FileStamp main_stamp_;
+	FileStamp delta_stamp_;
 
 	// pending ingest
 	PendingMode pending_mode_ = PendingMode::None;

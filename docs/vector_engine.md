@@ -338,6 +338,10 @@ engine.finalize()
 
 Inserted records are added through the delta index. This allows brinicle to accept updates without rebuilding the full main index after every insert.
 
+The delta index is rebuilt on every `finalize`. With `finalize(optimize=True)`, brinicle merges it into the main index once it outgrows `delta_ratio`; with the default `optimize=False` it never merges, and each write session costs more than the last. Pass `optimize=True` for a steady stream of small writes.
+
+`insert` and `upsert` need an index built with `build` first. Within a built index, a shard that has received no records yet builds its first segment when records are routed to it.
+
 ---
 
 ## Upsert
@@ -447,6 +451,14 @@ results = engine.search(Q, k=10)
 ```
 
 Use this for read/search sessions after an index has already been built.
+
+---
+
+## Concurrency
+
+One `VectorEngine` can be shared by many threads. Searches run in parallel; `finalize`, `delete_items`, `rebuild_compact`, `optimize_graph`, `close` and `destroy` wait for running searches and hold off new ones until they finish. Drive a write session (`init`, `ingest`, `finalize`) from one thread at a time.
+
+To keep searching while a long write runs, open a second `VectorEngine` on the same path for searches. Before each search it reloads any shard whose files another engine or process has changed, so it sees every completed write.
 
 ---
 
